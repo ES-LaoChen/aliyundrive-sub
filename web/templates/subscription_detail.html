@@ -1,0 +1,157 @@
+{% extends "base.html" %}
+{% from "macros.html" import page_head, badge, empty %}
+{% block title %}订阅详情 · {{ app_name }}{% endblock %}
+{% block content %}
+{{ page_head('订阅详情', '查看订阅的分享链接、运行记录与转存明细',
+  actions=
+    '<a class="btn primary" href="' + url_for('subscriptions.edit', sub_id=sub.id) + '"><svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75z"/></svg>编辑</a>' +
+    '<form method="post" action="' + url_for('subscriptions.check', sub_id=sub.id) + '"><button class="btn ghost" type="submit">立即检查</button></form>' +
+    '<form method="post" action="' + url_for('subscriptions.delete', sub_id=sub.id) + '" onsubmit="return confirm(\'确认删除该订阅？\');"><button class="btn danger" type="submit">删除</button></form>') }}
+
+<div class="grid-2">
+  <section class="surface">
+    <div class="section-head"><h2>基本信息</h2><span class="cell-sub">{{ sub.name }}</span></div>
+    <ul class="kv">
+      <li><span>订阅名</span><span class="cell-main">{{ sub.name }}</span></li>
+      <li><span>分享链接</span><span>{{ sub.share_url or '—' }}</span></li>
+      <li><span>保存目录</span><span>{{ sub.target_folder_path or '默认目录' }}</span></li>
+      <li><span>状态</span><span>{{ badge('sub', sub.status) }}</span></li>
+      <li><span>来源</span><span class="cell-sub">{{ sub.source }}</span></li>
+      <li><span>最近转存</span><span class="cell-sub">{{ sub.last_transfer_at | localtime if sub.last_transfer_at else '—' }}</span></li>
+      <li><span>链接失效计数</span><span class="cell-sub">{{ sub.link_fail_count }}</span></li>
+      <li><span>创建时间</span><span class="cell-sub">{{ sub.created_at | localtime if sub.created_at else '—' }}</span></li>
+      <li><span>备注</span><span>{{ sub.remark or '—' }}</span></li>
+    </ul>
+  </section>
+
+  <section class="surface">
+    <div class="section-head"><h2>媒体库信息</h2></div>
+    {% if sub.poster_url %}
+      <img src="{{ sub.poster_url }}" alt="海报" style="max-width:120px;border-radius:10px;box-shadow:var(--shadow-sm);margin-bottom:12px">
+    {% else %}
+      <p class="muted" style="margin-bottom:12px">暂无海报</p>
+    {% endif %}
+    <ul class="kv">
+      <li><span>TMDB ID</span><span>{{ sub.tmdb_id or '—' }}</span></li>
+    </ul>
+  </section>
+</div>
+
+<section class="surface">
+  <div class="section-head">
+    <h2>运行记录</h2>
+    <div class="head-actions">
+      <span class="cell-sub">最近 {{ runs|length }} 次</span>
+      <button type="button" class="btn ghost sm clear-records-btn"
+              data-url="{{ url_for('subscription_detail.clear_records', sub_id=sub.id) }}"
+              data-kind="runs" data-name="运行记录">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="3 6 5 6 21 6"></polyline>
+          <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+          <line x1="10" y1="11" x2="10" y2="17"></line>
+          <line x1="14" y1="11" x2="14" y2="17"></line>
+        </svg>
+        清理记录
+      </button>
+    </div>
+  </div>
+  <div class="table-wrap">
+    <table class="grid">
+      <thead><tr><th>开始</th><th>结束</th><th>新增</th><th>跳过</th><th>失败</th><th>状态</th></tr></thead>
+      <tbody>
+      {% for r in runs %}
+        <tr>
+          <td class="cell-sub">{{ r.started_at | localtime if r.started_at else '—' }}</td>
+          <td class="cell-sub">{{ r.finished_at | localtime if r.finished_at else '—' }}</td>
+          <td class="cell-main">{{ r.summary.get('added', 0) if r.summary else 0 }}</td>
+          <td class="cell-sub">{{ r.summary.get('skipped', 0) if r.summary else 0 }}</td>
+          <td class="cell-sub">{{ r.summary.get('failed', 0) if r.summary else 0 }}</td>
+          <td>{{ badge('run', r.status) }}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="6">{{ empty('暂无运行记录') }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="surface">
+  <div class="section-head">
+    <h2>转存记录</h2>
+    <div class="head-actions">
+      <span class="cell-sub">最近 {{ tasks|length }} 条</span>
+      <button type="button" class="btn ghost sm clear-records-btn"
+              data-url="{{ url_for('subscription_detail.clear_records', sub_id=sub.id) }}"
+              data-kind="tasks" data-name="转存记录">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="3 6 5 6 21 6"></polyline>
+          <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+          <line x1="10" y1="11" x2="10" y2="17"></line>
+          <line x1="14" y1="11" x2="14" y2="17"></line>
+        </svg>
+        清理记录
+      </button>
+    </div>
+  </div>
+  <div class="table-wrap">
+    <table class="grid">
+      <thead><tr><th>文件名</th><th>状态</th><th>时间</th><th>错误信息</th></tr></thead>
+      <tbody>
+      {% for t in tasks %}
+        <tr>
+          <td class="cell-main">{{ t.source_name }}</td>
+          <td>{{ badge('transfer', t.status) }}</td>
+          <td class="cell-sub">{{ t.created_at | localtime if t.created_at else '—' }}</td>
+          <td class="cell-sub">{{ t.last_error or '—' }}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="4">{{ empty('暂无转存记录') }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  // 「清理记录」：二次确认后清空对应列表的全部历史记录并刷新视图。
+  document.querySelectorAll('.clear-records-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var kind = btn.getAttribute('data-kind');
+      var name = btn.getAttribute('data-name');
+      var url = btn.getAttribute('data-url');
+      if (!window.confirm('确定要清空当前订阅的「' + name + '」全部历史记录吗？\n此操作不可恢复。')) {
+        return;
+      }
+      btn.disabled = true;
+      btn.classList.add('is-loading');
+      fetch(url, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({kind: kind})
+      })
+        .then(function (resp) {
+          return resp.json().then(function (data) { return {ok: resp.ok, data: data}; });
+        })
+        .then(function (res) {
+          if (res.ok && res.data.deleted !== undefined) {
+            location.reload();
+          } else {
+            btn.disabled = false;
+            btn.classList.remove('is-loading');
+            alert('清空失败：' + (res.data.error || '未知错误'));
+          }
+        })
+        .catch(function (err) {
+          btn.disabled = false;
+          btn.classList.remove('is-loading');
+          alert('请求失败：' + err);
+        });
+    });
+  });
+</script>
+{% endblock %}

@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+{% from "macros.html" import page_head, empty %}
+{% block title %}Telegram 监控日志 · {{ app_name }}{% endblock %}
+{% block content %}
+{{ page_head('Telegram Monitor Logs', 'Telegram 监控日志', '频道活动与处理记录') }}
+
+<!-- ============ 筛选表单 ============ -->
+<section class="surface">
+  <div class="section-head"><h2>筛选</h2></div>
+  <form method="get" action="{{ url_for('tg_monitor.logs') }}" class="inline-form">
+    {# 高频项：频道 + 状态 —— 始终显示 #}
+    <label>频道
+      <select name="channel">
+        <option value="">全部</option>
+        {% for ch in channels %}
+          <option value="{{ ch }}" {% if filters.channel == ch %}selected{% endif %}>{{ ch }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>状态
+      <input type="text" name="status" value="{{ filters.status }}" placeholder="received / skipped / ...">
+    </label>
+
+    {# 移动端「高级筛选」展开按钮 #}
+    <button type="button" class="btn ghost filter-toggle" id="filterToggle">高级筛选 ▾</button>
+
+    {# 低频率筛选项：移动端默认折叠 #}
+    <div class="filter-extra" id="filterExtra">
+      <label>消息类型
+        <input type="text" name="message_type" value="{{ filters.message_type }}" placeholder="share / text">
+      </label>
+      <label>事件类型
+        <input type="text" name="type" value="{{ filters.type }}" placeholder="message / create / ...">
+      </label>
+      <label>开始时间
+        <input type="datetime-local" name="start" value="{{ filters.start }}">
+      </label>
+      <label>结束时间
+        <input type="datetime-local" name="end" value="{{ filters.end }}">
+      </label>
+    </div>
+
+    <button type="submit" class="btn primary">筛选</button>
+  </form>
+  <div class="form-actions compact">
+    <a class="btn ghost" href="{{ url_for('tg_monitor.api_logs_export') }}?{{ request.query_string.decode() }}">导出 CSV</a>
+    <form method="post" action="{{ url_for('tg_monitor.logs_clear') }}" style="display:inline-flex" onsubmit="return confirm('确定要清空全部监控日志吗？此操作不可撤销。')">
+      <button type="submit" class="btn danger">清空日志</button>
+    </form>
+  </div>
+</section>
+
+<!-- ============ 日志表格 ============ -->
+<section class="surface">
+  <div class="section-head">
+    <h2>日志</h2>
+    <span class="cell-sub">共 {{ total }} 条 · 第 {{ page }} 页</span>
+  </div>
+
+  {% if logs %}
+    <div class="table-wrap">
+      <table class="grid">
+        <thead>
+          <tr>
+            <th>时间</th>
+            <th>频道</th>
+            <th>消息ID</th>
+            <th>消息类型</th>
+            <th>事件类型</th>
+            <th>状态</th>
+            <th>链接</th>
+            <th>说明</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in logs %}
+            <tr>
+              <td class="cell-sub">{{ row.created_at }}</td>
+              <td class="cell-main">{{ row.channel or '—' }}</td>
+              <td>{{ row.message_id if row.message_id is not none else '—' }}</td>
+              <td>{{ row.message_type or '—' }}</td>
+              <td>{{ row.event_type }}</td>
+              <td>{{ row.status }}</td>
+              <td class="cell-sub">{% if row.link %}<a href="{{ row.link }}" target="_blank" rel="noopener">{{ row.link }}</a>{% else %}—{% endif %}</td>
+              <td>{{ row.detail or '—' }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="pager">
+      {% if prev_url %}<a class="btn ghost" href="{{ prev_url }}">上一页</a>{% endif %}
+      <span class="page-info">第 {{ page }} 页 · 共 {{ total }} 条</span>
+      {% if next_url %}<a class="btn ghost" href="{{ next_url }}">下一页</a>{% endif %}
+    </div>
+  {% else %}
+    {{ empty('暂无日志') }}
+  {% endif %}
+</section>
+
+<script>
+(function () {
+  // ── 移动端「高级筛选」展开/折叠 ──
+  var toggleBtn = document.getElementById('filterToggle');
+  var extra = document.getElementById('filterExtra');
+  if (toggleBtn && extra) {
+    toggleBtn.addEventListener('click', function () {
+      extra.classList.toggle('open');
+      toggleBtn.textContent = extra.classList.contains('open') ? '收起筛选 ▴' : '高级筛选 ▾';
+    });
+  }
+})();
+</script>
+{% endblock %}

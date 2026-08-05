@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+{% from "macros.html" import page_head, badge %}
+{% block title %}设置 · {{ app_name }}{% endblock %}
+{% block content %}
+{{ page_head('Settings', '设置', '凭证与通知配置') }}
+
+<div class="settings-grid">
+{# ── 云盘凭证区块（默认展开） ── #}
+<details class="surface" open>
+  <summary><div class="section-head"><h2>云盘凭证</h2></div></summary>
+
+  <!-- 凭证状态 -->
+  <ul class="kv">
+    <li><span>已落库(DB)</span>
+      <span>{{ badge('bool', 'true' if token_status.db_saved else 'false', '是 ✓' if token_status.db_saved else '否') }}</span></li>
+    <li><span>drive_id</span><span class="cell-sub">{{ token_status.drive_id or '—' }}</span></li>
+  </ul>
+
+  <!-- Token 输入表单 -->
+  <form method="post" action="{{ url_for('settings.save_token') }}" class="mt-16">
+    <label>refresh_token
+      <input type="password" name="refresh_token" placeholder="粘贴阿里云盘 refresh_token" autocomplete="off">
+    </label>
+    <div class="form-actions">
+      <button type="submit" class="btn primary">保存并验证</button>
+    </div>
+  </form>
+</details>
+
+<form method="post" action="{{ url_for('settings.index') }}" class="settings-grid-2">
+  {# ── TMDB 配置区块（默认展开） ── #}
+  <details class="surface" open>
+    <summary><div class="section-head"><h2>TMDB 配置</h2></div></summary>
+    <label>TMDB API Key
+      <input type="password" name="tmdb_api_key" value="{{ cfg.tmdb_api_key or '' }}" placeholder="在 themoviedb.org 申请的 v3 API Key" autocomplete="off">
+    </label>
+    {% if cfg.tmdb_api_key %}<span class="badge ok">✓ 已保存</span>{% endif %}
+    <p class="hint">API Key 已保存于系统设置，新增订阅时自动读取调用（出于安全，密码框不回显明文；已保存会显示「✓ 已保存」徽标）。</p>
+    <div class="form-actions">
+      <button type="button" id="btn-test-tmdb" class="btn ghost">保存并测试</button>
+      <span id="tmdb-test-result" class="hint"></span>
+    </div>
+  </details>
+
+  {# ── 通知区块（默认折叠） ── #}
+  <details class="surface">
+    <summary><div class="section-head"><h2>通知</h2></div></summary>
+
+    <div class="subsection-head">
+      <h3>Telegram 频道监控通知 <span class="badge off">可选</span></h3>
+    </div>
+    <p class="hint">启用后，频道监控命中转存时通过 Bot 推送通知。需先创建 Bot 获取 Token 与目标 Chat ID；留空或关闭则不发送。</p>
+    <label class="inline">
+      <input type="checkbox" name="tg_notify_enabled" value="true" {{ 'checked' if cfg.tg_notify_enabled == 'true' else '' }}>
+      启用 Telegram 通知
+    </label>
+    <label>Bot Token
+      <input type="password" name="tg_bot_token" placeholder="123456:ABC-DEF…（不回显，已保存显示徽标）" autocomplete="off">
+    </label>
+    {% if cfg.tg_bot_token %}<span class="badge ok">✓ 已保存</span>{% endif %}
+    <label>频道 / Chat ID
+      <input name="tg_notify_chat_id" value="{{ cfg.tg_notify_chat_id or '' }}" placeholder="@mychannel 或 -1001234567890">
+    </label>
+  </details>
+
+  {# ── 订阅状态巡检区块（默认折叠） ── #}
+  <details class="surface">
+    <summary><div class="section-head"><h2>订阅状态巡检</h2></div></summary>
+    <p class="hint">全局巡检独立扫描「进行中」订阅：探测链接有效性 + 完结计时，失败达阈值自动标记「链接失效」。</p>
+    <label>失败次数阈值
+      <input name="link_fail_threshold" value="{{ cfg.link_fail_threshold or '3' }}" placeholder="3">
+    </label>
+    <span class="hint">链接访问失败达此值 → 标记「链接失效」</span>
+
+    <label>巡检周期(秒)
+      <input name="sub_check_interval" value="{{ cfg.sub_check_interval or '3600' }}" placeholder="3600">
+    </label>
+    <span class="hint">状态巡检轮询间隔（≥60 秒）</span>
+    <label class="inline">
+      <input type="checkbox" name="substatus_concurrency_enabled" value="true" {{ 'checked' if cfg.substatus_concurrency_enabled == 'true' else '' }}>
+      开启并发检查
+    </label>
+    <p class="hint">勾选后使用线程池并发探测，下方「并发数量」生效</p>
+    <label>并发数量
+      <input id="concurrency-workers" name="substatus_concurrency_workers" value="{{ cfg.substatus_concurrency_workers or '3' }}" placeholder="3">
+    </label>
+    <span class="hint">线程池 worker 数（I/O 密集）</span>
+
+    <label>中途等待时间(秒)
+      <input name="substatus_poll_wait_seconds" value="{{ cfg.substatus_poll_wait_seconds or '2' }}" placeholder="2">
+    </label>
+    <span class="hint">每条之间 sleep，防爬虫限速</span>
+
+    <div class="form-actions">
+      <button type="submit" class="btn primary">保存设置</button>
+    </div>
+  </details>
+
+</form>
+</div>
+
+<script>
+(function () {
+  const btn = document.getElementById('btn-test-tmdb');
+  const resultEl = document.getElementById('tmdb-test-result');
+  if (!btn || !resultEl) return;
+
+  btn.addEventListener('click', function () {
+    const keyInput = document.querySelector('input[name="tmdb_api_key"]');
+    const key = keyInput ? (keyInput.value || '') : '';
+    resultEl.textContent = '正在测试连接…';
+    resultEl.style.color = 'var(--muted)';
+
+    fetch('/settings/test-tmdb', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({api_key: key})
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (data) {
+      if (data.ok) {
+        // 端点已先保存配置再测试，结果位额外提示「已保存并测试」。
+        resultEl.textContent = '已保存并测试：' + (data.message || '连接成功');
+        resultEl.style.color = 'var(--ok)';
+      } else {
+        resultEl.textContent = '保存并测试失败：' + (data.message || '未知错误');
+        resultEl.style.color = 'var(--bad)';
+      }
+    })
+    .catch(function (err) {
+      resultEl.textContent = '请求失败：' + err;
+      resultEl.style.color = 'var(--bad)';
+    });
+  });
+
+  // SubStatus：并发开关联动「并发数量」输入框可用状态。
+  const concChk = document.querySelector('input[name="substatus_concurrency_enabled"]');
+  const workersInput = document.getElementById('concurrency-workers');
+  function syncWorkersState() {
+    if (!concChk || !workersInput) return;
+    const enabled = concChk.checked;
+    workersInput.disabled = !enabled;
+    workersInput.style.opacity = enabled ? '1' : '0.5';
+  }
+  if (concChk) {
+    concChk.addEventListener('change', syncWorkersState);
+    syncWorkersState();
+  }
+
+})();
+</script>
+{% endblock %}

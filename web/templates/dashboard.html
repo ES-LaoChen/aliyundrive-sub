@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% from "macros.html" import page_head, badge %}
+{% block title %}仪表盘 · {{ app_name }}{% endblock %}
+{% block content %}
+{{ page_head('Dashboard', '仪表盘', '订阅转存概览与系统状态') }}
+
+<div class="stats-bar">
+  <div class="stat-card">
+    <div class="stat-icon purple"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 5h2v2H3zM3 9h2v2H3zM3 13h2v2H3zM3 17h2v2H3zM7 5h14v2H7zM7 9h14v2H7zM7 13h14v2H7zM7 17h14v2H7z"/></svg></div>
+    <div class="stat-body"><div class="stat-num">{{ sub_total }}</div><div class="stat-label">订阅总数</div></div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-icon green"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg></div>
+    <div class="stat-body"><div class="stat-num">{{ sub_active }}</div><div class="stat-label">进行中订阅</div></div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-icon blue"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96z"/></svg></div>
+    <div class="stat-body"><div class="stat-num">{{ transfer_success }}</div><div class="stat-label">转存成功</div></div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-icon red"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M1 21h22L12 2zm12-3h-2v-2h2zM11 16h2v-5h-2z"/></svg></div>
+    <div class="stat-body"><div class="stat-num">{{ transfer_failed }}</div><div class="stat-label">转存失败</div></div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-icon blue"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg></div>
+    <div class="stat-body"><div class="stat-num">{{ tg_logs }}</div><div class="stat-label">监控日志</div></div>
+  </div>
+</div>
+
+<div class="grid-2">
+  <section class="surface">
+    <div class="section-head"><h2>系统状态</h2></div>
+    <ul class="kv">
+      <li><span>阿里云盘凭证</span><span>{{ badge('bool', 'true' if token_saved else 'false', '已配置 ✓' if token_saved else '未配置') }}</span></li>
+      <li><span>订阅（进行中 / 完结）</span><span class="cell-sub">{{ sub_active }} / {{ sub_completed }}</span></li>
+      <li><span>版本</span><span class="cell-sub">{{ version }}</span></li>
+    </ul>
+  </section>
+
+  <section class="surface">
+    <div class="section-head"><h2>快捷操作</h2></div>
+    <div class="actions" style="flex-direction:column;align-items:stretch;gap:12px">
+      <a class="btn primary" href="{{ url_for('subscriptions.new') }}">+ 新增订阅</a>
+      <a class="btn ghost" href="{{ url_for('tg_monitor.index') }}">查看频道监控</a>
+      <a class="btn ghost" href="{{ url_for('files.index') }}">浏览云盘资源</a>
+      <a class="btn ghost" href="{{ url_for('settings.index') }}">系统设置</a>
+    </div>
+  </section>
+</div>
+{% endblock %}

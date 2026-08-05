@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+{% from "macros.html" import page_head, badge, empty %}
+{% block title %}Telegram 监控 · {{ app_name }}{% endblock %}
+{% block content %}
+{{ page_head('Telegram Monitor', 'Telegram 频道监控', '公开频道监听与自动转存') }}
+
+{# ============ 双栏布局：左配置 / 右状态 ============ #}
+<div class="dual-panel">
+  <!-- ============ 配置表单 ============ -->
+  <section class="surface">
+    <form method="post" action="{{ url_for('tg_monitor.index') }}">
+      <div class="section-head"><h2>监控配置</h2></div>
+
+      <label class="inline">
+        <input type="checkbox" name="tg_enabled" value="on" {% if cfg.tg_enabled %}checked{% endif %}>
+        启用监控
+      </label>
+
+      <label>监控频道（逗号分隔；支持 @user / t.me/s/user / 纯 user / 数字ID）
+        <textarea name="tg_channels" placeholder="@channel1, https://t.me/s/channel2, 123456789">{{ cfg.tg_channels or '' }}</textarea>
+      </label>
+      <span class="hint">多个频道以英文逗号分隔，每行一个亦可。</span>
+
+      <label>轮询周期（秒，最小 60）
+        <input type="number" name="tg_poll_interval" value="{{ cfg.tg_poll_interval or 300 }}" min="60">
+      </label>
+
+      <details class="subconfig">
+        <summary>代理配置（可选）</summary>
+        <label>代理地址（爬取用，留空直连）
+          <input type="text" name="tg_proxy" value="{{ cfg.tg_proxy or '' }}" placeholder="http://127.0.0.1:7890">
+        </label>
+      </details>
+
+      <div class="form-actions">
+        <button type="submit" class="btn primary">保存配置</button>
+      </div>
+    </form>
+  </section>
+
+  <!-- ============ 状态面板 ============ -->
+  <section class="surface">
+    <div class="section-head">
+      <h2>监控状态</h2>
+      <span id="refresh-hint" class="cell-sub"></span>
+    </div>
+
+    <ul class="kv">
+      <li><span>启用状态</span>
+        <span>{{ badge('bool', 'true' if status.enabled else 'false', '已启用 ✓' if status.enabled else '未启用') }}</span>
+      </li>
+      <li><span>轮询 Job</span>
+        <span>
+          {% if status.poll_job_active is none %}
+            {{ badge('poll', 'none', '未知') }}
+          {% elif status.poll_job_active %}
+            {{ badge('bool', 'true', '运行中 ✓') }}
+          {% else %}
+            {{ badge('bool', 'false', '未注册') }}
+          {% endif %}
+        </span>
+      </li>
+      <li><span>轮询周期</span><span class="cell-sub">{{ status.poll_interval }} 秒</span></li>
+    </ul>
+
+    <div class="section-head spaced"><h2>频道明细</h2></div>
+    {% if status.channels %}
+      <div class="table-wrap">
+        <table class="grid">
+          <thead>
+            <tr>
+              <th>频道</th>
+              <th>最近推送内容</th>
+              <th>已处理链接数</th>
+              <th>最近轮询时间</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for ch in status.channels %}
+              <tr>
+                <td class="cell-main">
+                  <a class="link" href="{{ url_for('tg_monitor.channel_detail', channel=ch.channel) }}">{{ ch.channel }}</a>
+                </td>
+                <td>
+                  {% if ch.latest_text %}
+                  <div class="ch-push-text">{{ ch.latest_text }}</div>
+                  {% endif %}
+                  {% if ch.latest_links %}
+                  <div class="ch-push-links">
+                    {% for l in ch.latest_links %}
+                    <a class="link" href="{{ l }}" target="_blank" rel="noopener noreferrer">{{ l }}</a>
+                    {% endfor %}
+                  </div>
+                  {% endif %}
+                  {% if not ch.latest_text and not ch.latest_links %}
+                  <span class="cell-sub">暂无推送内容</span>
+                  {% endif %}
+                </td>
+                <td>{{ ch.processed_count }}</td>
+                <td class="cell-sub">{% if ch.updated_at %}{{ ch.updated_at | localtime }}{% else %}—{% endif %}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      {{ empty('暂无监控频道（请在上方配置并启用）', '') }}
+    {% endif %}
+  </section>
+</div>
+
+<script>
+  // 每 15 秒静默刷新一次状态（仅拉取 /api/status，不刷新整页）。
+  (function () {
+    function refresh() {
+      fetch("{{ url_for('tg_monitor.api_status') }}", {cache: "no-store"})
+        .then(function (r) { return r.json(); })
+        .then(function () {
+          var hint = document.getElementById("refresh-hint");
+          if (hint) hint.textContent = "已自动刷新 · " + new Date().toLocaleTimeString();
+        })
+        .catch(function () {});
+    }
+    var timer = setInterval(refresh, 15000);
+    document.addEventListener("visibilitychange", function () {
+      if (document.hidden) { clearInterval(timer); }
+    });
+  })();
+</script>
+{% endblock %}

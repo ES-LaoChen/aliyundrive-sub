@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}{{ app_name }}{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header class="appbar">
+    <button class="nav-toggle" id="navToggle" aria-label="菜单">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+    </button>
+    <div class="appbar-brand">
+      <span class="appbar-logo">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14.6 14.5l-3.6 3.6-1.6-1.6-1.4 1.4 3 3 5-5z"/></svg>
+      </span>
+      <span class="appbar-title">{{ app_name }}</span>
+    </div>
+    <div class="appbar-spacer"></div>
+    <div class="appbar-user">
+      <span class="appbar-version">v1.0</span>
+      <div class="avatar">A</div>
+    </div>
+  </header>
+
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-inner">
+      <nav class="nav">
+        <a class="nav-item" href="{{ url_for('index') }}" data-match-prefixes="/">
+          <span class="nav-icon"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 3h8v8H3zM13 3h8v8h-8zM3 13h8v8H3zM13 13h8v8h-8z"/></svg></span>
+          <span class="nav-label">仪表盘</span>
+        </a>
+        <a class="nav-item" href="{{ url_for('subscriptions.index') }}" data-match-prefixes="/subscriptions">
+          <span class="nav-icon"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 5h2v2H3zM3 9h2v2H3zM3 13h2v2H3zM3 17h2v2H3zM7 5h14v2H7zM7 9h14v2H7zM7 13h14v2H7zM7 17h14v2H7z"/></svg></span>
+          <span class="nav-label">订阅管理</span>
+        </a>
+        <a class="nav-item" href="{{ url_for('tg_monitor.index') }}" data-match-prefixes="/tg-monitor">
+          <span class="nav-icon"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg></span>
+          <span class="nav-label">TG 频道监控</span>
+        </a>
+        <a class="nav-item" href="{{ url_for('files.index') }}" data-match-prefixes="/files">
+          <span class="nav-icon"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg></span>
+          <span class="nav-label">云盘资源</span>
+        </a>
+        <a class="nav-item" href="{{ url_for('logs.index') }}" data-match-prefixes="/logs">
+          <span class="nav-icon"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M13 3c-4.97 0-9 4.03-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42C8.27 19.99 10.51 21 13 21c4.97 0 9-4.03 9-9s-4.03-9-9-9zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg></span>
+          <span class="nav-label">转存记录</span>
+        </a>
+
+        <a class="nav-item" href="{{ url_for('settings.index') }}" data-match-prefixes="/settings">
+          <span class="nav-icon"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.44.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.03.24.23.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg></span>
+          <span class="nav-label">系统设置</span>
+        </a>
+      </nav>
+    </div>
+    <div class="sidebar-footer">v1.0 · 公网部署请经反代鉴权</div>
+  </aside>
+  <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
+
+  <main class="workspace">
+    <div class="content">
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+          <ul class="flashes">
+            {% for cat, msg in messages %}
+              <li class="flash {{ cat }}">{{ msg }}</li>
+            {% endfor %}
+          </ul>
+        {% endif %}
+      {% endwith %}
+
+      {% block content %}{% endblock %}
+    </div>
+  </main>
+
+  <script>
+    (function () {
+      var sidebar = document.getElementById('sidebar');
+      var backdrop = document.getElementById('sidebarBackdrop');
+      var toggle = document.getElementById('navToggle');
+      function openSidebar() { sidebar.classList.add('open'); backdrop.classList.add('show'); }
+      function closeSidebar() { sidebar.classList.remove('open'); backdrop.classList.remove('show'); }
+      if (toggle) toggle.addEventListener('click', function () {
+        sidebar.classList.contains('open') ? closeSidebar() : openSidebar();
+      });
+      if (backdrop) backdrop.addEventListener('click', closeSidebar);
+
+      var pathname = window.location.pathname;
+      document.querySelectorAll('.nav-item').forEach(function (el) {
+        var prefixes = (el.dataset.matchPrefixes || '').split(' ').filter(Boolean);
+        if (!prefixes.length) return;
+        var active = prefixes.some(function (p) {
+          if (p === '/') return pathname === '/';
+          return pathname === p || pathname.indexOf(p + '/') === 0;
+        });
+        el.classList.toggle('active', active);
+      });
+    })();
+  </script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

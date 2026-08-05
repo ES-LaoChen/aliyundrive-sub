@@ -1,0 +1,107 @@
+{% extends "base.html" %}
+{% from "macros.html" import badge, empty %}
+
+{% macro event_label(et) %}
+  {% set labels = {
+    'message': '收到消息', 'no_link': '无链接', 'no_match': '未匹配订阅',
+    'link_same': '链接一致', 'link_updated': '链接更新', 'status_restored': '状态恢复',
+    'system': '系统', 'poll': '轮询', 'error': '错误', 'fetch_failed': '抓取失败',
+    'skipped': '跳过'
+  } %}
+  {{ labels.get(et, et) }}
+{% endmacro %}
+
+{% macro badge_class(st) %}
+  {% set bmap = {
+    'received': 'ok', 'matched': 'ok', 'ok': 'ok', 'completed': 'ok',
+    'skip': 'off', 'neutral': 'off', 'off': 'off',
+    'error': 'bad', 'bad': 'bad',
+    'warn': 'warn', 'info': 'info', 'auth': 'auth'
+  } %}
+  {{ bmap.get(st, 'off') }}
+{% endmacro %}
+
+{% set back_btn = '<a class="btn ghost" href="' ~ url_for('tg_monitor.index') ~ '">← 返回监控</a>' %}
+
+{{ page_head('Telegram 频道监控', channel, '频道日记 · 按时间轴展示频道推送的具体内容',
+   actions=back_btn) }}
+
+<section class="surface">
+  {% if state %}
+  <ul class="kv">
+    <li><span>频道</span><b>{{ channel }}</b></li>
+    <li><span>已处理链接数</span><b>{{ processed_count }}</b></li>
+    <li><span>最近更新</span><b>{% if state.updated_at %}{{ state.updated_at | localtime }}{% else %}—{% endif %}</b></li>
+  </ul>
+  {% else %}
+  <ul class="kv">
+    <li><span>频道</span><b>{{ channel }}</b></li>
+    <li><span>状态</span><b>尚未收到任何推送</b></li>
+  </ul>
+  {% endif %}
+
+  {% if latest %}
+  <div class="latest-push">
+    <div class="latest-push-head">最近推送</div>
+    {% if latest.text %}<div class="latest-push-text">{{ latest.text }}</div>{% endif %}
+    {% if latest.links %}
+    <div class="latest-push-links">
+      {% for l in latest.links %}
+      <a class="link" href="{{ l }}" target="_blank" rel="noopener noreferrer">{{ l }}</a>
+      {% endfor %}
+    </div>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {% if all_channels and all_channels | length > 1 %}
+  <div class="channel-nav">
+    <span class="muted">切换频道：</span>
+    {% for c in all_channels %}
+      {% if c == channel %}
+        <span class="channel-chip active">{{ c }}</span>
+      {% else %}
+        <a class="channel-chip" href="{{ url_for('tg_monitor.channel_detail', channel=c) }}">{{ c }}</a>
+      {% endif %}
+    {% endfor %}
+  </div>
+  {% endif %}
+</section>
+
+<section class="surface">
+  <div class="section-head spaced"><h2>频道日记</h2></div>
+
+  {% if not entries %}
+    {{ empty('该频道暂无推送记录', '频道推送的内容会按时间轴显示在这里') }}
+  {% else %}
+  <div class="diary">
+    {% for e in entries %}
+    <div class="diary-item">
+      <div class="diary-time">
+        <span class="diary-ts">{{ e.created_at | localtime }}</span>
+        {% if e.message_id %}<span class="diary-mid">#{{ e.message_id }}</span>{% endif %}
+      </div>
+      <div class="diary-rail">
+        <span class="diary-dot {{ badge_class(e.status) }}"></span>
+      </div>
+      <div class="diary-body">
+        {{ badge(event_label(e.event_type), badge_class(e.status)) }}
+        {% if e.text %}
+        <div class="diary-content">{{ e.text }}</div>
+        {% endif %}
+        {% if e.links %}
+        <div class="diary-links">
+          {% for l in e.links %}
+          <a class="link" href="{{ l }}" target="_blank" rel="noopener noreferrer">{{ l }}</a>
+          {% endfor %}
+        </div>
+        {% endif %}
+        {% if e.detail and not e.text and not e.links %}
+        <div class="diary-detail">{{ e.detail }}</div>
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+</section>

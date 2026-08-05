@@ -1,0 +1,160 @@
+{#
+  partials/folder_picker.html – 统一目录选择器局部模板
+
+  参数（通过 {% include %} 的 with 子句传入）：
+    container_mode: "modal" | "inline"  （默认 "modal"）
+    field_prefix: string （默认 "target"），
+      隐藏域命名为 {field_prefix}_folder_id, {field_prefix}_folder_path, {field_prefix}_drive_type
+    endpoint_drives: string （默认 /files/api/drives）
+    endpoint_list: string （默认 /files/api/list）
+    initial_folder_id: string （默认 ""）
+    initial_folder_path: string （默认 ""）
+    initial_drive_type: string （默认 ""）
+    display_input_id: string （默认 "" — 只读展示输入框 ID）
+    status_element_id: string （默认 "" — 状态提示元素 ID）
+    open_btn_id: string （默认 "btn-open-picker"）
+    change_btn_id: string （默认 "btn-change-picker"）
+    clear_btn_id: string （默认 "btn-clear-picker"）
+
+  使用示例：
+    {% include "partials/folder_picker.html" with context %}
+    <script src="{{ url_for('static', filename='folder_picker.js') }}"></script>
+
+  或传自定义参数：
+    {% include "partials/folder_picker.html" with {
+      "container_mode": "inline",
+      "field_prefix": "tg_target",
+      "open_btn_id": "fp-open",
+      "change_btn_id": "fp-change",
+      "clear_btn_id": "fp-clear"
+    } %}
+#}
+
+{# ── 设置默认值 ── #}
+{% set fp_container_mode = container_mode|default('modal') %}
+{% set fp_prefix = field_prefix|default('target') %}
+{% set fp_drives_ep = endpoint_drives|default(url_for('files.api_drives')) %}
+{% set fp_list_ep = endpoint_list|default(url_for('files.api_list')) %}
+{% set fp_initial_id = initial_folder_id|default('') %}
+{% set fp_initial_path = initial_folder_path|default('') %}
+{% set fp_initial_drive = initial_drive_type|default('') %}
+{% set fp_display_id = display_input_id|default('') %}
+{% set fp_status_id = status_element_id|default('') %}
+{% set fp_open_id = open_btn_id|default('btn-open-picker') %}
+{% set fp_change_id = change_btn_id|default('btn-change-picker') %}
+{% set fp_clear_id = clear_btn_id|default('btn-clear-picker') %}
+
+{# 生成容器唯一 ID 前缀 #}
+{% set fp_uid = fp_prefix ~ '-fp' %}
+
+{# ── 模态容器 ── #}
+{% if fp_container_mode == 'modal' %}
+{# 常驻触发区：显示框 + 打开/清空按钮 + 状态提示（始终可见） #}
+<div class="fp-target" id="{{ fp_uid }}-trigger">
+  <input type="text" id="{{ fp_display_id }}" class="fp-display-input"
+         value="{{ fp_initial_path }}" readonly
+         placeholder="点击右侧按钮选择云盘目录">
+  <button type="button" id="{{ fp_open_id }}" class="btn ghost">选择云盘目录</button>
+  <button type="button" id="{{ fp_clear_id }}" class="mini" {% if not fp_initial_id %}hidden{% endif %}>清空</button>
+  <span class="fp-msg" id="{{ fp_status_id }}">{% if fp_initial_path %}已选择：{{ fp_initial_path }}{% else %}未选择目录{% endif %}</span>
+</div>
+
+<div class="modal-mask" id="{{ fp_uid }}-modal" hidden>
+  <div class="modal-panel">
+    <div class="modal-head">
+      <h2>选择目标目录</h2>
+      <button type="button" class="btn ghost mini" id="{{ fp_uid }}-close" title="关闭">×</button>
+    </div>
+
+    {# 盘切换 #}
+    <div class="modal-toolbar">
+      <div class="drive-switcher" id="{{ fp_uid }}-drive-switcher"></div>
+      <div class="modal-current-path" id="{{ fp_uid }}-current-path">/</div>
+    </div>
+
+    {# 面包屑 #}
+    <nav class="breadcrumb picker-breadcrumb" id="{{ fp_uid }}-breadcrumb"></nav>
+
+    {# 文件夹列表（懒加载） #}
+    <div class="modal-body" id="{{ fp_uid }}-list">
+      <div class="empty">加载中…</div>
+    </div>
+
+    <div class="modal-foot">
+      <span class="hint" id="{{ fp_uid }}-selection-hint">点击文件夹可进入子目录</span>
+      <div>
+        <button type="button" class="btn ghost" id="{{ fp_uid }}-cancel">取消</button>
+        <button type="button" class="btn primary" id="{{ fp_uid }}-confirm" disabled>选定此目录</button>
+      </div>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+{# ── 内联面板容器 ── #}
+{% if fp_container_mode == 'inline' %}
+<div id="{{ fp_uid }}-inline-container" class="folder-picker">
+  {# 已选目录展示区 #}
+  <div id="{{ fp_uid }}-selected" class="fp-selected" {% if not fp_initial_id %}hidden{% endif %}>
+    <span class="fp-selected-label">已选目录：</span>
+    <span id="{{ fp_uid }}-selected-text" class="fp-selected-text">{{ fp_initial_path }}{% if fp_initial_drive %}（{{ fp_initial_drive }}）{% endif %}</span>
+    <button type="button" id="{{ fp_change_id }}" class="mini">更改</button>
+  </div>
+
+  {# 选择入口按钮 #}
+  <button type="button" id="{{ fp_open_id }}" class="btn ghost" {% if fp_initial_id %}hidden{% endif %}>选择云盘目录</button>
+
+  {# 内联浏览面板 #}
+  <div id="{{ fp_uid }}-panel" class="fp-panel" hidden>
+    <div class="fp-panel-head">
+      <label class="fp-drive-label">云盘
+        <select id="{{ fp_uid }}-drive" class="fp-drive-select"></select>
+      </label>
+      <button type="button" id="{{ fp_uid }}-panel-close" class="mini">收起</button>
+    </div>
+
+    <nav id="{{ fp_uid }}-crumbs" class="fp-crumbs" aria-label="目录路径"></nav>
+    <div class="fp-current-path">当前目录：<span id="{{ fp_uid }}-path">/</span></div>
+
+    <ul id="{{ fp_uid }}-list" class="fp-list"></ul>
+    <div id="{{ fp_uid }}-error" class="fp-error" hidden></div>
+
+    <div class="fp-panel-actions">
+      <button type="button" id="{{ fp_uid }}-choose" class="btn primary">选择此目录</button>
+      <span class="fp-hint">点击文件夹可进入下一级，面包屑可回退</span>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+{# ── 隐藏域（两种容器模式共用） ── #}
+<input type="hidden" name="{{ fp_prefix }}_folder_id" id="{{ fp_prefix }}_folder_id" value="{{ fp_initial_id }}">
+<input type="hidden" name="{{ fp_prefix }}_folder_path" id="{{ fp_prefix }}_folder_path" value="{{ fp_initial_path }}">
+<input type="hidden" name="{{ fp_prefix }}_drive_type" id="{{ fp_prefix }}_drive_type" value="{{ fp_initial_drive }}">
+
+{# ── 将配置传给 JS 实例 ── #}
+<script>
+  document.addEventListener('DOMContentLoaded', function () {
+    // 仅在页面尚未初始化 FolderPicker 时执行
+    if (window.folderPickerInstance && window.folderPickerInstance['{{ fp_uid }}']) return;
+    var pickerOptions = {
+      containerMode: '{{ fp_container_mode }}',
+      fieldPrefix: '{{ fp_prefix }}',
+      uid: '{{ fp_uid }}',
+      drivesEndpoint: '{{ fp_drives_ep | safe }}',
+      listEndpoint: '{{ fp_list_ep | safe }}',
+      initialFolderId: '{{ fp_initial_id }}',
+      initialFolderPath: '{{ fp_initial_path }}',
+      initialDriveType: '{{ fp_initial_drive }}',
+      displayInputId: '{{ fp_display_id }}',
+      statusElementId: '{{ fp_status_id }}',
+      openBtnId: '{{ fp_open_id }}',
+      changeBtnId: '{{ fp_change_id }}',
+      clearBtnId: '{{ fp_clear_id }}',
+    };
+    if (window.FolderPicker) {
+      window.folderPickerInstance = window.folderPickerInstance || {};
+      window.folderPickerInstance['{{ fp_uid }}'] = new window.FolderPicker(pickerOptions);
+    }
+  });
+</script>

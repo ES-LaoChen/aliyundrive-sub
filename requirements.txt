@@ -1,0 +1,32 @@
+# Web（服务端渲染，无前端构建步骤）
+Flask>=2.3,<3.1
+Jinja2>=3.1
+Werkzeug>=2.3
+
+# 调度
+APScheduler>=3.10,<4.0
+pytz>=2023.3
+
+# 数据
+SQLAlchemy>=2.0,<3.0
+
+# HTTP
+requests>=2.31
+urllib3>=2.0
+httpx>=0.27,<1.0
+
+# HTML 解析（Telegram 频道网页爬取兜底）
+beautifulsoup4>=4.12
+
+# TG 机器人实时监听频道（无需管理员权限，Bot 作为频道成员即可收消息）
+pytelegrambotapi>=4.15
+
+# 配置
+pydantic>=2.5
+pydantic-settings>=2.1
+python-dotenv>=1.0
+
+# 测试
+pytest>=7.4
+pytest-mock>=3.12
+responses>=0.25

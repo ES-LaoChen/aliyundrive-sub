@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+{% from "macros.html" import page_head, empty %}
+{% block title %}云盘资源 · {{ app_name }}{% endblock %}
+{% block content %}
+{{ page_head('Cloud Files', '云盘资源') }}
+
+{# ── 磁盘切换器 ── #}
+{% if drives %}
+<div class="drive-switcher">
+  {% for d in drives %}
+  <a class="btn {% if d.drive_type == current_drive %}primary{% else %}ghost{% endif %}"
+     href="{{ url_for('files.index', drive=d.drive_type) }}">
+    {{ d.drive_name }}
+    {% if d.drive_type == current_drive %}
+    <span style="margin-left:4px">✓</span>
+    {% endif %}
+  </a>
+  {% endfor %}
+</div>
+{% endif %}
+
+{# ── 面包屑导航 + 返回上一级 ── #}
+{% if breadcrumb %}
+<div class="breadcrumb-bar">
+  {# 返回上一级按钮 #}
+  {% set prev_crumb = breadcrumb[:-1] %}
+  {% set prev_parent = prev_crumb[-1].id if prev_crumb else 'root' %}
+  <a class="btn ghost"
+     href="{{ url_for('files.index', parent=prev_parent, drive=current_drive, crumb=crumb_encode(prev_crumb)) }}">
+    ← 返回上级
+  </a>
+  {# 面包屑路径 #}
+  <nav class="breadcrumb">
+    <a href="{{ url_for('files.index', drive=current_drive) }}" class="cell-sub">根目录</a>
+    {% for crumb in breadcrumb %}
+    <span class="cell-sub">/</span>
+    {% if loop.last %}
+    <span class="cell-main">{{ crumb.name }}</span>
+    {% else %}
+    {% set partial_crumb = breadcrumb[:loop.index] %}
+    <a href="{{ url_for('files.index', parent=crumb.id, drive=current_drive, crumb=crumb_encode(partial_crumb)) }}"
+       class="cell-sub">{{ crumb.name }}</a>
+    {% endif %}
+    {% endfor %}
+  </nav>
+</div>
+{% endif %}
+
+{# ── 新建文件夹 ── #}
+<form class="inline-form" method="post" action="{{ url_for('files.create_folder') }}">
+  <input type="hidden" name="parent" value="{{ parent }}">
+  <input type="hidden" name="path" value="{{ path }}">
+  <input type="hidden" name="drive" value="{{ current_drive }}">
+  <input type="hidden" name="drive_id" value="{{ current_drive_id or '' }}">
+  <input type="hidden" name="crumb" value="{{ crumb_raw }}">
+  <input name="name" placeholder="新文件夹名" required>
+  <button class="btn" type="submit">+ 新建文件夹</button>
+</form>
+
+{# ── 文件列表 ── #}
+<section class="surface">
+  <div class="table-wrap">
+    <table class="grid">
+      <thead><tr><th>名称</th><th>类型</th><th>大小</th><th style="text-align:right">操作</th></tr></thead>
+      <tbody>
+        {% for f in items %}
+        <tr>
+          <td><span class="cell-main">{{ '📁' if f.type == 'folder' else '📄' }} {{ f.name }}</span></td>
+          <td class="cell-sub">{{ f.type }}</td>
+          <td class="cell-sub">{{ f.size }}</td>
+          <td>
+            <div class="row-actions">
+              {% if f.type == 'folder' %}
+                {# 计算新面包屑 = 当前面包屑 + 当前文件夹 #}
+                {% set new_crumb = breadcrumb + [{'id': f.file_id, 'name': f.name}] %}
+                <a class="mini" href="{{ url_for('files.index', parent=f.file_id, path=path ~ '/' ~ f.name, drive=current_drive, crumb=crumb_encode(new_crumb)) }}">打开</a>
+              {% else %}
+                <form method="post" action="{{ url_for('files.download') }}">
+                  <input type="hidden" name="file_id" value="{{ f.file_id }}">
+                  <input type="hidden" name="parent" value="{{ parent }}">
+                  <input type="hidden" name="path" value="{{ path }}">
+                  <input type="hidden" name="drive" value="{{ current_drive }}">
+                  <input type="hidden" name="drive_id" value="{{ current_drive_id or '' }}">
+                  <input type="hidden" name="crumb" value="{{ crumb_raw }}">
+                  <button class="mini" type="submit">下载</button>
+                </form>
+
+              {% endif %}
+              <form method="post" action="{{ url_for('files.rename') }}"
+                    onsubmit="var n=prompt('新名称','{{ f.name }}');if(!n)return false;this.new_name.value=n;return true;">
+                <input type="hidden" name="file_id" value="{{ f.file_id }}">
+                <input type="hidden" name="parent" value="{{ parent }}">
+                <input type="hidden" name="path" value="{{ path }}">
+                <input type="hidden" name="drive" value="{{ current_drive }}">
+                <input type="hidden" name="drive_id" value="{{ current_drive_id or '' }}">
+                <input type="hidden" name="crumb" value="{{ crumb_raw }}">
+                <input type="hidden" name="new_name" value="">
+                <button class="mini" type="submit">重命名</button>
+              </form>
+              <form method="post" action="{{ url_for('files.delete') }}"
+                    onsubmit="return confirm('确认删除「{{ f.name }}」？');">
+                <input type="hidden" name="file_id" value="{{ f.file_id }}">
+                <input type="hidden" name="parent" value="{{ parent }}">
+                <input type="hidden" name="path" value="{{ path }}">
+                <input type="hidden" name="drive" value="{{ current_drive }}">
+                <input type="hidden" name="drive_id" value="{{ current_drive_id or '' }}">
+                <input type="hidden" name="crumb" value="{{ crumb_raw }}">
+                <button class="mini danger" type="submit">删除</button>
+              </form>
+            </div>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="4">{{ empty('该目录为空或读取失败。') }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

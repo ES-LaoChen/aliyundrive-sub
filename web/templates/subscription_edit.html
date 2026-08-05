@@ -1,0 +1,296 @@
+{% extends "base.html" %}
+{% from "macros.html" import page_head %}
+{% block title %}订阅编辑 · {{ app_name }}{% endblock %}
+{% block content %}
+{{ page_head('Subscription', '编辑订阅' if sub else '新增订阅', '配置一条分享链订阅的转存规则') }}
+
+<section class="form">
+  <form method="post"
+        action="{{ url_for('subscriptions.update', sub_id=sub.id) if sub else url_for('subscriptions.create') }}">
+    <div class="card-group">
+
+      <section class="surface">
+        <div class="section-head"><h2>基本信息</h2><span class="cell-sub">分享链接与订阅名称</span></div>
+        <label>订阅名称<span class="required-mark">*</span><input name="name" value="{{ form.name or '' }}" required></label>
+        <label>分享链接<input name="share_url" value="{{ form.share_url or '' }}" placeholder="https://www.aliyundrive.com/s/xxxx"></label>
+      </section>
+
+      <section class="surface">
+        <div class="section-head"><h2>TMDB 识别</h2><span class="cell-sub">按名称搜索 → 回填标题 / 海报 / 简介</span></div>
+        {# ── TMDB 识别（按名称搜索 → 选择结果回填标题 / 海报 / 简介） ── #}
+        <fieldset class="tmdb-block">
+          <legend>TMDB 识别</legend>
+          <div class="tmdb-search-row">
+            <input name="tmdb_query" id="tmdb_query" placeholder="输入影视作品或人物名称，如「盗梦空间」">
+            <select id="tmdb_type" style="width:auto;min-width:100px">
+              <option value="multi">影视作品</option>
+              <option value="person">人物</option>
+            </select>
+            <button type="button" id="btn-tmdb-search" class="btn ghost">搜索</button>
+          </div>
+          <div id="tmdb-search-status" class="hint"></div>
+          <ul id="tmdb-results" class="tmdb-results" hidden></ul>
+          <div class="tmdb-id-row">
+            <label>已选 TMDB ID
+              <input name="tmdb_id" id="tmdb_id" value="{{ form.tmdb_id or '' }}" readonly placeholder="从上方搜索结果中选择">
+            </label>
+            <button type="button" id="btn-tmdb-fetch" class="btn ghost">按 ID 重新获取</button>
+            <span id="tmdb-fetch-status" class="hint"></span>
+          </div>
+          <div class="tmdb-poster-wrap">
+            <img id="tmdb-poster" src="{{ form.poster_url or '' }}" alt="海报预览"
+                 style="{% if form.poster_url %}max-width:160px;{% else %}display:none;{% endif %}">
+          </div>
+          <input type="hidden" name="poster_url" id="poster_url" value="{{ form.poster_url or '' }}">
+        </fieldset>
+      </section>
+
+      <section class="surface">
+        <div class="section-head"><h2>保存目录</h2><span class="cell-sub">选择转存目标文件夹</span></div>
+        {# ── 目标目录（路径选择器） — 用 {% with %} 传递参数给 partial ── #}
+        {% with container_mode="modal", field_prefix="target",
+                initial_folder_id=form.target_folder_id|default(''),
+                initial_folder_path=form.target_folder_path|default(''),
+                initial_drive_type=form.target_drive_type|default(''),
+                display_input_id="target_folder_path_display",
+                status_element_id="folder-picker-status",
+                open_btn_id="btn-open-picker",
+                change_btn_id="btn-change-picker",
+                clear_btn_id="btn-clear-picker" %}
+        {% include "partials/folder_picker.html" %}
+        {% endwith %}
+      </section>
+
+      <section class="surface">
+        <div class="section-head"><h2>调度与重命名</h2><span class="cell-sub">检查周期与文件重命名规则</span></div>
+        <label>检查周期(秒或 @every 1h)<input name="interval" value="{{ form.interval or '3600' }}"></label>
+
+        {# ── 重命名规则（可配置：无 / 命名模板 / 前缀后缀 / 时间戳） ── #}
+        {% set cur_rename_mode = form.rename_mode or 'none' %}
+        <label>重命名规则
+          <select name="rename_mode" id="rename_mode">
+            <option value="none" {{ 'selected' if cur_rename_mode == 'none' }}>无</option>
+            <option value="template" {{ 'selected' if cur_rename_mode == 'template' }}>命名模板</option>
+            <option value="prefix_suffix" {{ 'selected' if cur_rename_mode == 'prefix_suffix' }}>前缀后缀</option>
+            <option value="timestamp" {{ 'selected' if cur_rename_mode == 'timestamp' }}>时间戳</option>
+          </select>
+        </label>
+
+        {# template 模式：命名模板 + 自定义正则（原有字段包进此分组，按模式显隐） #}
+        <div data-mode="template">
+          <label>命名模板<input name="naming_template" value="{{ form.naming_template or '' }}" placeholder="不会恋爱的我们.E{}"></label>
+          <label>自定义正则<input name="naming_regex" value="{{ form.naming_regex or '' }}" placeholder="留空用内置正则"></label>
+        </div>
+
+        {# prefix_suffix 模式：前缀 + 后缀 #}
+        <div data-mode="prefix_suffix">
+          <label>前缀<input name="rename_prefix" value="{{ form.rename_prefix or '' }}" placeholder="如 [A]"></label>
+          <label>后缀<input name="rename_suffix" value="{{ form.rename_suffix or '' }}" placeholder="如 [B]"></label>
+        </div>
+
+        {# timestamp 模式：无需输入，仅说明 #}
+        <div data-mode="timestamp">
+          <p class="hint">文件名将附加转存时间戳，例如：<code>原名_20260715_203000.mp4</code>，无需额外输入。</p>
+        </div>
+      </section>
+
+      <section class="surface">
+        <div class="section-head"><h2>状态</h2><span class="cell-sub">启用状态与备注</span></div>
+        <fieldset>
+          <legend>状态</legend>
+          <label class="inline"><input type="radio" name="status" value="active" {{ 'checked' if (form.status or 'active') == 'active' }}>进行中</label>
+          <label class="inline"><input type="radio" name="status" value="completed" {{ 'checked' if form.status == 'completed' }}>已完结</label>
+        </fieldset>
+        <label>备注<textarea name="remark">{{ form.remark or '' }}</textarea></label>
+      </section>
+
+      <div class="form-actions">
+        <button type="submit" class="btn primary">保存</button>
+        {% if sub %}
+        <form method="post" action="{{ url_for('subscriptions.check', sub_id=sub.id) }}">
+          <button type="submit" class="btn ghost">立即检查一次</button>
+        </form>
+        <form method="post" action="{{ url_for('subscriptions.delete', sub_id=sub.id) }}"
+              onsubmit="return confirm('确认删除该订阅？');">
+          <button type="submit" class="btn danger">删除</button>
+        </form>
+        {% endif %}
+      </div>
+    </div>
+  </form>
+</section>
+
+{# ── 文件夹选择器 DOM 由 partials/folder_picker.html 注入 ── #}
+<script src="{{ url_for('static', filename='folder_picker.js') }}"></script>
+
+{# ── TMDB 识别 JS（保留内联，按 W2 建议本轮不抽） ── #}
+<script>
+(function () {
+  const queryInput = document.getElementById('tmdb_query');
+  const typeSel = document.getElementById('tmdb_type');
+  const btnSearch = document.getElementById('btn-tmdb-search');
+  const searchStatus = document.getElementById('tmdb-search-status');
+  const resultsEl = document.getElementById('tmdb-results');
+  const btnFetch = document.getElementById('btn-tmdb-fetch');
+  const idInput = document.getElementById('tmdb_id');
+  const fetchStatus = document.getElementById('tmdb-fetch-status');
+  const posterImg = document.getElementById('tmdb-poster');
+  const posterHidden = document.getElementById('poster_url');
+  const nameInput = document.querySelector('input[name="name"]');
+  const remarkInput = document.querySelector('textarea[name="remark"]');
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  function setSearchStatus(msg, ok) {
+    if (!searchStatus) return;
+    searchStatus.textContent = msg;
+    searchStatus.style.color = ok ? 'var(--ok)' : (ok === false ? 'var(--bad)' : 'var(--muted)');
+  }
+
+  function setFetchStatus(msg, ok) {
+    if (!fetchStatus) return;
+    fetchStatus.textContent = msg;
+    fetchStatus.style.color = ok ? 'var(--ok)' : (ok === false ? 'var(--bad)' : 'var(--muted)');
+  }
+
+  function showPoster(url) {
+    if (!posterImg) return;
+    if (url) {
+      posterImg.src = url;
+      posterImg.style.display = '';
+      posterImg.style.maxWidth = '160px';
+    } else {
+      posterImg.src = '';
+      posterImg.style.display = 'none';
+    }
+    if (posterHidden) posterHidden.value = url || '';
+  }
+
+  // 选中某条搜索结果：把 id 写入隐藏字段，并直接用搜索返回结果回填表单。
+  function selectResult(item) {
+    if (idInput) idInput.value = item.id;
+    if (nameInput && item.name) nameInput.value = item.name;
+    if (remarkInput && item.overview) remarkInput.value = item.overview;
+    showPoster(item.poster_url || '');
+    if (resultsEl) {
+      resultsEl.querySelectorAll('.tmdb-result.selected').forEach(el => el.classList.remove('selected'));
+      const target = resultsEl.querySelector('[data-id="' + item.id + '"]');
+      if (target) target.classList.add('selected');
+    }
+    setSearchStatus('已选择：' + (item.name || ('ID ' + item.id)), true);
+  }
+
+  function renderResults(results) {
+    if (!resultsEl) return;
+    resultsEl.innerHTML = '';
+    resultsEl.hidden = false;
+    const typeLabelMap = {movie: '电影', tv: '剧集', person: '人物', multi: ''};
+    results.forEach(function (item) {
+      const li = document.createElement('li');
+      li.className = 'tmdb-result';
+      li.setAttribute('data-id', item.id);
+      const typeLabel = typeLabelMap[item.media_type] || item.media_type || '';
+      li.innerHTML =
+        '<span class="tmdb-result-main">' +
+          '<strong>' + escapeHtml(item.name || ('ID ' + item.id)) + '</strong>' +
+          (typeLabel ? '<span class="tmdb-result-type">' + escapeHtml(typeLabel) + '</span>' : '') +
+          '<span class="tmdb-result-id">TMDB ID: ' + escapeHtml(String(item.id)) + '</span>' +
+        '</span>' +
+        (item.poster_url ? '<img class="tmdb-result-poster" src="' + escapeHtml(item.poster_url) + '" alt="">' : '');
+      li.addEventListener('click', function () { selectResult(item); });
+      resultsEl.appendChild(li);
+    });
+  }
+
+  if (btnSearch && queryInput) {
+    btnSearch.addEventListener('click', function () {
+      const q = queryInput.value ? queryInput.value.trim() : '';
+      if (!q) {
+        setSearchStatus('请输入搜索关键词', false);
+        return;
+      }
+      const type = typeSel ? typeSel.value : 'multi';
+      setSearchStatus('正在搜索…', null);
+      if (resultsEl) { resultsEl.innerHTML = ''; resultsEl.hidden = true; }
+
+      fetch('/subscriptions/api/tmdb/search?q=' + encodeURIComponent(q) + '&type=' + encodeURIComponent(type), {credentials: 'same-origin'})
+        .then(function (r) { return r.json().then(function (d) { return {ok: r.ok, data: d}; }); })
+        .then(function (res) {
+          if (!res.ok) {
+            setSearchStatus(res.data.error || '搜索失败', false);
+            if (resultsEl) { resultsEl.hidden = true; }
+            return;
+          }
+          const results = res.data.results || [];
+          if (!results.length) {
+            setSearchStatus(res.data.message || '未找到匹配结果', false);
+            if (resultsEl) { resultsEl.hidden = true; }
+            return;
+          }
+          setSearchStatus('找到 ' + results.length + ' 条结果，点击即可选中', true);
+          renderResults(results);
+        })
+        .catch(function (err) {
+          setSearchStatus('请求失败：' + err, false);
+        });
+    });
+  }
+
+  // 兼容旧的「按 ID 获取信息」按钮：选中结果（或手填 ID）后仍可用详情接口刷新标题 / 简介 / 海报。
+  if (btnFetch) {
+    btnFetch.addEventListener('click', function () {
+      const id = idInput && idInput.value ? idInput.value.trim() : '';
+      if (!id) {
+        setFetchStatus('请先在上方搜索并选择一个结果（或填写 TMDB ID）', false);
+        return;
+      }
+      if (!/^\d+$/.test(id)) {
+        setFetchStatus('TMDB ID 必须是数字', false);
+        return;
+      }
+
+      setFetchStatus('正在获取…', null);
+      fetch('/subscriptions/api/tmdb/' + encodeURIComponent(id), {credentials: 'same-origin'})
+        .then(function (r) {
+          return r.json().then(function (data) { return {ok: r.ok, data: data}; });
+        })
+        .then(function (res) {
+          if (!res.ok) {
+            setFetchStatus(res.data.error || '获取失败', false);
+            return;
+          }
+          const info = res.data;
+          if (nameInput) nameInput.value = info.title || '';
+          if (remarkInput) remarkInput.value = info.overview || '';
+          showPoster(info.poster_url || '');
+          setFetchStatus('获取成功：' + (info.title || ''), true);
+        })
+        .catch(function (err) {
+          setFetchStatus('请求失败：' + err, false);
+        });
+    });
+  }
+})();
+</script>
+
+{# ── 重命名规则联动 JS ── #}
+<script>
+(function () {
+  const renameModeSel = document.getElementById('rename_mode');
+  const renameGroups = document.querySelectorAll('[data-mode]');
+  function syncRenameGroups() {
+    if (!renameModeSel) return;
+    const mode = renameModeSel.value;
+    renameGroups.forEach(function (g) {
+      g.style.display = (g.getAttribute('data-mode') === mode) ? '' : 'none';
+    });
+  }
+  if (renameModeSel) {
+    renameModeSel.addEventListener('change', syncRenameGroups);
+    syncRenameGroups();
+  }
+})();
+</script>
+{% endblock %}

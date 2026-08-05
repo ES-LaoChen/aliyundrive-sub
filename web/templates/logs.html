@@ -1,0 +1,129 @@
+{% extends "base.html" %}
+{% from "macros.html" import page_head, badge, empty %}
+{% block title %}转存记录 · {{ app_name }}{% endblock %}
+{% block content %}
+{{ page_head('Transfer Logs', '转存记录', '查看每次检查与转存的结果') }}
+
+<section class="surface">
+  <div class="toolbar">
+    <form class="toolbar-filters" method="get" action="{{ url_for('logs.index') }}">
+      <select name="status">
+        <option value="">全部结果</option>
+        <option value="success" {{ 'selected' if status == 'success' }}>成功</option>
+        <option value="failed" {{ 'selected' if status == 'failed' }}>失败</option>
+        <option value="skipped" {{ 'selected' if status == 'skipped' }}>跳过</option>
+      </select>
+      <select name="subscription_id">
+        <option value="">全部订阅</option>
+        {% for s in subscriptions %}
+        <option value="{{ s.id }}" {{ 'selected' if sub_id == (s.id | string) }}>{{ s.name or s.id }}</option>
+        {% endfor %}
+      </select>
+      <button class="btn" type="submit">筛选</button>
+    </form>
+
+    <div class="toolbar-actions">
+      <button class="btn danger" type="button" id="clean-selected">批量删除选中</button>
+      <div class="clean-range">
+        <select id="clean-mode" aria-label="选择时间范围">
+          <option value="7d">最近7天</option>
+          <option value="30d">最近30天</option>
+          <option value="all">全部</option>
+        </select>
+        <button class="btn ghost" type="button" id="clean-by-range">按时间范围清理</button>
+      </div>
+    </div>
+  </div>
+  <div id="clean-result" class="hint"></div>
+</section>
+
+<section class="surface">
+  <div class="table-wrap">
+    <table class="grid">
+      <thead><tr>
+        <th style="width:36px"></th>
+        <th>时间</th><th>订阅ID</th><th>来源文件</th><th>目标名称</th><th>结果</th><th style="text-align:right">说明</th>
+      </tr></thead>
+      <tbody>
+        {% for r in records %}
+        <tr>
+          <td><input type="checkbox" class="rec-select" value="{{ r.id }}" aria-label="选择记录 {{ r.id }}"></td>
+          <td class="cell-sub">{{ r.created_at | localtime  }}</td>
+          <td>{{ r.subscription_id }}</td>
+          <td>{{ r.source_name }}</td>
+          <td>{{ r.target_name }}{% if r.renamed %} {{ badge('bool', 'true', '已重命名') }}{% endif %}</td>
+          <td>{{ badge('transfer', r.status) }}</td>
+          <td class="cell-sub">{{ r.message or '' }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="7">{{ empty('暂无记录。') }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<script>
+  // 转存记录清理：批量删除 / 时间范围清理，均带二次确认，防误删。
+  (function () {
+    var result = document.getElementById("clean-result");
+
+    /** 在结果提示区显示消息。isError=true 时以错误样式呈现。 */
+    function showResult(msg, isError) {
+      if (!result) { return; }
+      result.textContent = msg;
+      result.className = "hint" + (isError ? " error" : " ok");
+    }
+
+    /** 发送清理请求：先二次确认，再 fetch JSON，成功则刷新列表。 */
+    function doClean(payload) {
+      if (!window.confirm("确定要清理？此操作不可恢复。")) { return; }
+      fetch("{{ url_for('logs.clean') }}", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Requested-With": "XMLHttpRequest"
+        },
+        body: JSON.stringify(payload)
+      })
+        .then(function (resp) {
+          return resp.json().then(function (data) {
+            if (resp.ok) {
+              showResult("已清理 " + (data.deleted || 0) + " 条转存记录", false);
+              location.reload();
+            } else {
+              showResult(data.error || "清理失败", true);
+            }
+          });
+        })
+        .catch(function () {
+          showResult("请求失败，请重试", true);
+        });
+    }
+
+    var byRangeBtn = document.getElementById("clean-by-range");
+    if (byRangeBtn) {
+      byRangeBtn.addEventListener("click", function () {
+        var mode = document.getElementById("clean-mode").value;
+        doClean({ mode: mode });
+      });
+    }
+
+    var byIdsBtn = document.getElementById("clean-selected");
+    if (byIdsBtn) {
+      byIdsBtn.addEventListener("click", function () {
+        var checked = Array.prototype.slice.call(
+          document.querySelectorAll(".rec-select:checked")
+        );
+        var ids = checked.map(function (el) { return parseInt(el.value, 10); });
+        if (!ids.length) {
+          showResult("请先勾选要删除的记录", true);
+          return;
+        }
+        doClean({ ids: ids });
+      });
+    }
+
+  })();
+</script>
+{% endblock %}

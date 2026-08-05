@@ -1,0 +1,71 @@
+{#
+  macros.html – Jinja2 通用宏库
+  用于 UI 重构项目，包含 badge / page_head / empty 等组件宏。
+  所有宏仅使用 style.css 设计系统变量与现有类，零硬编码。
+#}
+
+{#
+  badge(kind, status, text=None)
+  通用语义徽章渲染。
+  kind ∈ {"sub", "transfer", "run", "bool", "poll"}
+  status → CSS class 映射见内部字典。
+  text: 可选覆盖显示文本（不传则用默认中文映射或原始 status）。
+#}
+{% macro badge(kind, status, text=None) %}
+  {%- set sub_map = {'active': 'ok', 'completed': 'off'} -%}
+  {%- set transfer_map = {'success': 'ok', 'failed': 'bad'} -%}
+  {%- set run_map = {'success': 'ok', 'partial': 'warn', 'failed': 'bad', 'skipped_locked': 'off'} -%}
+  {%- set bool_map = {'true': 'ok', 'false': 'off', '1': 'ok', '0': 'off'} -%}
+  {%- set poll_map = {'none': 'warn'} -%}
+  {%- set sub_text_map = {'active': '进行中', 'completed': '已完结'} -%}
+  {%- set transfer_text_map = {'success': '成功', 'failed': '失败'} -%}
+  {%- set _class = '' -%}
+  {%- set display = text or status -%}
+  {%- if kind == 'sub' -%}
+    {%- set _class = sub_map.get(status, 'warn') -%}
+    {%- set display = text or sub_text_map.get(status, status) -%}
+  {%- elif kind == 'transfer' -%}
+    {%- set _class = transfer_map.get(status, 'warn') -%}
+    {%- set display = text or transfer_text_map.get(status, status) -%}
+  {%- elif kind == 'run' -%}
+    {%- set _class = run_map.get(status, 'auth') -%}
+  {%- elif kind == 'bool' -%}
+    {%- set _class = bool_map.get(status|lower, 'off') -%}
+  {%- elif kind == 'poll' -%}
+    {%- set _class = poll_map.get(status, 'off') -%}
+  {%- endif -%}
+  <span class="badge {{ _class }}">{{ display }}</span>
+{% endmacro %}
+
+{#
+  page_head(eyebrow, title, subtitle='', actions='')
+  标准页面头渲染。
+  eyebrow: <p class="eyebrow"> 文本
+  title: <h1> 文本
+  subtitle: 可选副标题
+  actions: 可选 HTML 字符串（按钮/链接组）
+#}
+{% macro page_head(eyebrow, title, subtitle='', actions='') %}
+  <div class="page-head">
+    <div>
+      <p class="eyebrow">{{ eyebrow }}</p>
+      <h1>{{ title }}</h1>
+      {% if subtitle %}<p class="subtle">{{ subtitle }}</p>{% endif %}
+    </div>
+    {% if actions %}<div class="actions">{{ actions | safe }}</div>{% endif %}
+  </div>
+{% endmacro %}
+
+{#
+  empty(text='暂无数据', icon='')
+  空状态占位渲染。
+  text: 显示文本
+  icon: 可选图标字符
+#}
+{% macro empty(text='暂无数据', icon='') %}
+  {% if icon %}
+    <div class="empty">{{ icon }} {{ text }}</div>
+  {% else %}
+    <div class="empty">{{ text }}</div>
+  {% endif %}
+{% endmacro %}

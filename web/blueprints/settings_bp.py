@@ -1,0 +1,199 @@
+"""设置蓝图：云盘凭证状态 / 凭证输入 / TMDB / Telegram 通知 / 订阅状态巡检。
+
+凭证区既展示状态（db_saved / drive_id），也支持前端手动
+输入 refresh_token（POST /settings/token），保存到 DB 并尝试验证有效性。
+TMDB/Telegram 通知/订阅状态巡检可在此保存：写入 Setting KV 表（持久化）
+并实时更新运行时对象。
+"""
+from __future__ import annotations
+
+import logging
+
+from flask import (
+    Blueprint,
+    current_app,
+    flash,
+    jsonify,
+    redirect,
+    render_template,
+    request,
+    url_for,
+)
+
+from core.tmdb import TMDBClient
+from models import Setting
+from schemas import SettingsForm
+from web.services import Services
+
+logger = logging.getLogger(__name__)
+
+bp = Blueprint("settings", __name__, url_prefix="/settings")
+
+
+def _services() -> Services:
+    return current_app.config["SERVICES"]
+
+
+def _get_kv(db, key: str, default: str = "") -> str:
+    row = db.query(Setting).filter_by(key=key).first()
+    return row.value if row else default
+
+
+def _set_kv(db, key: str, value: str) -> None:
+    row = db.query(Setting).filter_by(key=key).first()
+    if row is None:
+        db.add(Setting(key=key, value=value))
+    else:
+        row.value = value
+    db.commit()
+
+
+@bp.route("", methods=["GET"])
+def index():
+    svc = _services()
+    with svc.session_factory() as db:
+        cfg = {
+            "tmdb_api_key": _get_kv(db, "tmdb_api_key", ""),
+            # SubStatus 巡检配置（未配置回退默认值）。
+            "link_fail_threshold": _get_kv(db, "link_fail_threshold", "3"),
+            "sub_check_interval": _get_kv(db, "sub_check_interval", "3600"),
+            "substatus_concurrency_enabled": _get_kv(db, "substatus_concurrency_enabled", "false"),
+            "substatus_concurrency_workers": _get_kv(db, "substatus_concurrency_workers", "3"),
+            "substatus_poll_wait_seconds": _get_kv(db, "substatus_poll_wait_seconds", "2"),
+            # Telegram 频道监控通知（可选）：从 KV 读取，回退 env 默认值。
+            "tg_notify_enabled": _get_kv(db, "tg_notify_enabled", "false"),
+            "tg_notify_chat_id": _get_kv(db, "tg_notify_chat_id", svc.settings.TG_NOTIFY_CHAT_ID),
+            "tg_bot_token": _get_kv(db, "tg_bot_token", svc.settings.TG_BOT_TOKEN),
+        }
+    # 凭证状态（不展示明文）。
+    token = svc.token_store.get_token()
+    token_status = {
+        "db_saved": bool(token and token.refresh_token),
+        "drive_id": token.drive_id if token else "",
+    }
+    return render_template("settings.html", cfg=cfg, token_status=token_status)
+
+
+@bp.route("", methods=["POST"])
+def save():
+    svc = _services()
+    form = SettingsForm(
+        tmdb_api_key=request.form.get("tmdb_api_key", ""),
+        # SubStatus 巡检配置（checkbox 未勾选时表单不含该字段，回退默认 "false"）。
+        link_fail_threshold=request.form.get("link_fail_threshold", "3"),
+        sub_check_interval=request.form.get("sub_check_interval", "3600"),
+        substatus_concurrency_enabled=request.form.get("substatus_concurrency_enabled", "false"),
+        substatus_concurrency_workers=request.form.get("substatus_concurrency_workers", "3"),
+        substatus_poll_wait_seconds=request.form.get("substatus_poll_wait_seconds", "2"),
+        # Telegram 频道监控通知（可选）：checkbox 未勾选时表单不含 enabled 字段，回退 "false"。
+        tg_notify_enabled=request.form.get("tg_notify_enabled", "false"),
+        tg_notify_chat_id=request.form.get("tg_notify_chat_id", "").strip(),
+        tg_bot_token=request.form.get("tg_bot_token", "").strip(),
+    )
+    try:
+        with svc.session_factory() as db:
+            # 关键修复：浏览器不会回显 password 字段的已保存值，导致用户在其他配置保存时
+            # 未重新输入 API Key，表单提交为空字符串，从而把已存的 Key 覆盖成空（表现为
+            # 「Key 无法保存 / 保存后消失」）。因此仅当用户实际填写了 Key 才覆盖，
+            # 否则保留 KV 中既有值。
+            if form.tmdb_api_key:
+                _set_kv(db, "tmdb_api_key", form.tmdb_api_key)
+            # SubStatus：写入 5 个巡检 KV（运行参数每轮读 DB 热更新）。
+            _set_kv(db, "link_fail_threshold", form.link_fail_threshold)
+            _set_kv(db, "sub_check_interval", form.sub_check_interval)
+            _set_kv(db, "substatus_concurrency_enabled", form.substatus_concurrency_enabled)
+            _set_kv(db, "substatus_concurrency_workers", form.substatus_concurrency_workers)
+            _set_kv(db, "substatus_poll_wait_seconds", form.substatus_poll_wait_seconds)
+            # Telegram 频道监控通知（可选）KV 落库。
+            _set_kv(db, "tg_notify_enabled", form.tg_notify_enabled)
+            _set_kv(db, "tg_notify_chat_id", form.tg_notify_chat_id)
+            # 同 TMDB API Key 的处理：浏览器不回显密码框，仅当用户实际填写了 Token 才覆盖，
+            # 否则保留 KV 中既有值（避免保存其它设置时把已存的 Token 清空）。
+            if form.tg_bot_token:
+                _set_kv(db, "tg_bot_token", form.tg_bot_token)
+            # 计算 TG 有效 token：优先用本次表单填写的，否则回退 KV 中已存的
+            # （密码框不回显，保存其它设置时不应把已存的 Token 清空）。
+            # 必须在会话仍开启时计算，避免块外使用已关闭会话（健壮性隐患，不依赖
+            # SQLAlchemy「关闭后仍可复用连接」的实现细节）。
+            effective_tg_token = form.tg_bot_token or _get_kv(db, "tg_bot_token", "")
+
+        # 实时更新运行时对象（通知器）。
+        # Webhook 通知功能已移除，此处不再调用 configure。
+        # TG 通知热更新：开关开启且 token+chat_id 齐全才注册，否则降级（静默不发送）。
+        if form.tg_notify_enabled == "true" and effective_tg_token and form.tg_notify_chat_id:
+            svc.notifier.configure_telegram(effective_tg_token, form.tg_notify_chat_id)
+        else:
+            svc.notifier.configure_telegram("", "")
+        # 热更新巡检周期 job（仅当 scheduler 提供 reschedule 时；
+        # 运行参数阈值/并发/等待每轮读 DB 天然热更新，无需此处处理）。
+        reschedule = getattr(svc.scheduler, "reschedule_substatus_poll", None)
+        if callable(reschedule):
+            try:
+                reschedule(svc.session_factory)
+            except Exception:
+                logger.exception("热更新 substatus_poll 巡检周期失败（忽略）")
+    except Exception as exc:
+        logger.exception("保存设置失败")
+        flash(f"保存设置失败：{exc}", "error")
+        return redirect(url_for("settings.index"))
+
+    flash("设置已保存", "success")
+    return redirect(url_for("settings.index"))
+
+
+@bp.route("/token", methods=["POST"])
+def save_token():
+    """接收前端输入的 refresh_token，保存到 DB 并验证。"""
+    svc = _services()
+    refresh_token = request.form.get("refresh_token", "").strip()
+    if not refresh_token:
+        flash("请输入 refresh_token", "error")
+        return redirect(url_for("settings.index"))
+
+    # 保存到 DB（仅写 refresh_token 列，不覆盖已有 access_token / drive_id）。
+    svc.token_store.save_refresh_token(refresh_token)
+
+    # 尝试验证 token（刷新 access_token）。
+    try:
+        svc.client.refresh_access_token()
+        flash("refresh_token 已保存并验证成功", "success")
+    except Exception as exc:
+        flash(f"refresh_token 已保存，但验证失败：{exc}", "warning")
+
+    return redirect(url_for("settings.index"))
+
+
+@bp.route("/test-tmdb", methods=["POST"], endpoint="test_tmdb")
+def test_tmdb():
+    """测试 TMDB API Key 连通性：先保存配置（如请求携带 key）再验证 Key 有效性。
+
+    读取优先级：JSON body 的 ``api_key`` → 表单 ``api_key`` → Setting KV 表。
+    若请求体/表单携带**非空** ``api_key``，则先 ``_set_kv`` 持久化该 key，
+    再做连通性测试（即「保存并测试」语义，测试即使用刚保存的 key）；
+    否则仅做测试，沿用已保存的 KV key（兼容旧行为）。
+    始终返回 HTTP 200，由前端依据 ``ok`` 显示成功（绿）或失败（红）提示，
+    连接验证失败给出清晰错误信息。
+    """
+    svc = _services()
+    payload = request.get_json(silent=True) or {}
+    api_key = payload.get("api_key", "")
+    if not api_key:
+        api_key = request.form.get("api_key", "")
+
+    if api_key:
+        # 请求携带非空 key → 先持久化（保存并测试），测试即使用该 key。
+        with svc.session_factory() as db:
+            _set_kv(db, "tmdb_api_key", api_key)
+    else:
+        # 未携带 key → 回退读取已保存的 KV key（兼容旧行为）。
+        with svc.session_factory() as db:
+            api_key = _get_kv(db, "tmdb_api_key", "")
+
+    if not api_key:
+        return jsonify(ok=False, message="请输入或先保存 TMDB API Key")
+
+    ok, message = TMDBClient(api_key=api_key).test_connection()
+    return jsonify(ok=ok, message=message)
+
+
+

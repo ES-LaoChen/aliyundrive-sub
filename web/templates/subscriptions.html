@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% from "macros.html" import page_head, badge, empty %}
+{% block title %}订阅列表 · {{ app_name }}{% endblock %}
+{% block content %}
+{{ page_head('订阅列表', '管理所有订阅的分享链接与转存规则',
+  actions='<a class="btn primary" href="' + url_for('subscriptions.new') + '"><svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6z"/></svg>新增订阅</a>') }}
+
+{% set total = subscriptions|length %}
+{% set active_count = subscriptions|selectattr('status','equalto','active')|list|length %}
+{% set pending_count = subscriptions|selectattr('status','equalto','pending_update')|list|length %}
+{% set completed_count = subscriptions|selectattr('status','equalto','completed')|list|length %}
+
+<div class="stats-bar">
+  <div class="stat-card">
+    <div class="stat-icon purple"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 5h2v2H3zM3 9h2v2H3zM3 13h2v2H3zM3 17h2v2H3zM7 5h14v2H7zM7 9h14v2H7zM7 13h14v2H7zM7 17h14v2H7z"/></svg></div>
+    <div class="stat-body"><div class="stat-num">{{ total }}</div><div class="stat-label">订阅总数</div></div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-icon green"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg></div>
+    <div class="stat-body"><div class="stat-num">{{ active_count }}</div><div class="stat-label">进行中</div></div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-icon amber"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2zM11 16h2v-5h-2z"/></svg></div>
+    <div class="stat-body"><div class="stat-num">{{ pending_count }}</div><div class="stat-label">待更新</div></div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-icon blue"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M20 6h-8l-2-2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2z"/></svg></div>
+    <div class="stat-body"><div class="stat-num">{{ completed_count }}</div><div class="stat-label">已完结</div></div>
+  </div>
+</div>
+
+<div class="filter-bar">
+  <form class="inline-form" method="get" action="{{ url_for('subscriptions.index') }}">
+    <label>状态
+      <select name="status">
+        <option value="all" {{ 'selected' if status_filter == 'all' }}>全部</option>
+        <option value="active" {{ 'selected' if status_filter == 'active' }}>进行中</option>
+        <option value="pending_update" {{ 'selected' if status_filter == 'pending_update' }}>待更新</option>
+        <option value="completed" {{ 'selected' if status_filter == 'completed' }}>已完结</option>
+      </select>
+    </label>
+    <button class="btn primary" type="submit">筛选</button>
+    {% if status_filter != 'all' %}<a class="btn ghost" href="{{ url_for('subscriptions.index') }}">清空</a>{% endif %}
+  </form>
+</div>
+
+<section class="surface">
+  <div class="section-head"><h2>订阅列表</h2><span class="cell-sub">共 {{ subscriptions|length }} 条</span></div>
+  <div class="table-wrap">
+    <table class="grid">
+      <thead>
+        <tr>
+          <th>订阅名</th>
+          <th>检查周期</th>
+          <th>最近检查</th>
+          <th>状态</th>
+          <th style="text-align:right">操作</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for s in subscriptions %}
+        <tr>
+          <td class="cell-main">{{ s.name }}</td>
+          <td class="cell-sub">{{ s.interval }}</td>
+          <td class="cell-sub">{{ s.last_check_at | localtime if s.last_check_at else '—' }}</td>
+          <td>{{ badge('sub', s.status) }}</td>
+          <td>
+            <div class="row-actions">
+              <a class="mini" href="{{ url_for('subscription_detail.detail', sub_id=s.id) }}">详情</a>
+              <a class="mini" href="{{ url_for('subscriptions.edit', sub_id=s.id) }}">编辑</a>
+              <form method="post" action="{{ url_for('subscriptions.check', sub_id=s.id) }}">
+                <button class="mini" type="submit">检查</button>
+              </form>
+              <form method="post" action="{{ url_for('subscriptions.toggle', sub_id=s.id) }}">
+                <button class="mini" type="submit">{% if s.status == 'active' %}完成{% else %}启用{% endif %}</button>
+              </form>
+              <form method="post" action="{{ url_for('subscriptions.delete', sub_id=s.id) }}" onsubmit="return confirm('确认删除该订阅？');">
+                <button class="mini danger" type="submit">删除</button>
+              </form>
+            </div>
+          </td>
+        </tr>
+      {% else %}
+        <tr><td colspan="5">{{ empty('还没有任何订阅，点击右上角「新增订阅」开始。') }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}
