@@ -18,11 +18,29 @@
 
 仓库已提供 `docker-compose.yml`，通过编排从仓库代码本地构建并启动，**无需手动 build，也无需公共镜像仓库**（镜像为私有，直接 pull 会 `pull access denied`）。
 
-### 2.1 命令行（服务器 / 宝塔终端）
+### 2.0 获取项目代码（二选一）
 
+**方式 A：git clone（服务器已装 git）**
 ```bash
 git clone https://github.com/ES-LaoChen/aliyundrive-sub.git
 cd aliyundrive-sub
+```
+若提示 `git: command not found`，先安装：`apt install -y git`（Debian/Ubuntu）或 `yum install -y git`（CentOS），再执行 clone。
+
+**方式 B：下载 ZIP 包（服务器无 git 时推荐）**
+```bash
+# 安装解压工具（如没有）
+apt install -y unzip    # 或 yum install -y unzip
+# 下载仓库 ZIP
+curl -L -o aliyundrive-sub.zip https://github.com/ES-LaoChen/aliyundrive-sub/archive/refs/heads/main.zip
+unzip aliyundrive-sub.zip
+cd aliyundrive-sub-main     # 注意 ZIP 解压后的目录名带 -main 后缀
+```
+> 若仓库为私有（404），方式 B 需在 URL 中带 token 或改用方式 A 并配置凭据；公开仓库直接可下载。
+
+### 2.1 命令行（服务器 / 宝塔终端）
+
+```bash
 docker compose up -d          # 自动 build + 启动
 ```
 
