@@ -14,7 +14,55 @@
 
 ---
 
-## 二、在服务器拉取仓库代码
+## 二、方式一：容器编排一键部署（推荐他人使用）
+
+仓库已提供 `docker-compose.yml`，通过编排从仓库代码本地构建并启动，**无需手动 build，也无需公共镜像仓库**（镜像为私有，直接 pull 会 `pull access denied`）。
+
+### 2.1 命令行（服务器 / 宝塔终端）
+
+```bash
+git clone https://github.com/ES-LaoChen/aliyundrive-sub.git
+cd aliyundrive-sub
+docker compose up -d          # 自动 build + 启动
+```
+
+- 启动后容器名 `aliyundrive-sub`，端口 `8000`，数据挂载到 `./data`。
+- 查看状态：`docker compose ps`
+- 查看日志：`docker compose logs -f`
+- 更新代码后重建：`git pull && docker compose up -d --build`
+- 停止：`docker compose down`（保留 `./data` 数据）
+
+### 2.2 宝塔面板「编排」导入
+
+1. 宝塔 **Docker → 编排**，点击「添加编排」。
+2. 编排类型选「**已有目录**」或「**创建编排**」：
+   - 若服务器已 `git clone` 过仓库：直接指定 `aliyundrive-sub/docker-compose.yml` 路径导入。
+   - 否则在「创建编排」中粘贴本仓库 `docker-compose.yml` 内容，保存。
+3. 点击「**构建 / 启动**」。编排会执行 `build`（从仓库代码）后再运行容器。
+4. 启动成功后在「容器」列表可见 `aliyundrive-sub` 运行中。
+
+> 关键：compose 使用 `build:` 段从本地代码构建，**不要**改成 `image:` 公共地址，否则宝塔编排会尝试 pull 私有镜像而失败。若你已手动 `docker build` 过镜像，才可按 compose 文件内注释改用 `image:`。
+
+### 2.3 填写环境变量
+
+编辑 `docker-compose.yml` 的 `environment:` 段，至少填入：
+
+| 变量 | 说明 |
+| --- | --- |
+| `ALIYUNDRIVE_REFRESH_TOKEN` | **必填**，阿里云盘 token；留空可后在 Web 设置页填 |
+| `TG_BOT_TOKEN` / `TG_MONITOR_CHANNELS` / `TG_MONITOR_ENABLED` | 按需启用 TG 监控 |
+| `TG_NOTIFY_ENABLED` / `TG_NOTIFY_CHAT_ID` | 按需启用 TG 通知 |
+| `ARIA2_RPC_*` | 按需启用远程下载 |
+
+改完环境变量后执行 `docker compose up -d` 使其生效。
+
+---
+
+## 三、方式二：手动构建 + 宝塔建容器（备选）
+
+> 适合不熟悉 compose、希望完全在宝塔 UI 操作的用户。
+
+### 3.1 在服务器拉取仓库代码
 
 SSH 登录服务器，任选目录克隆仓库：
 
@@ -25,9 +73,7 @@ cd aliyundrive-sub
 
 > 构建上下文为仓库根目录（含 `Dockerfile` 与 `app.py`）。`.dockerignore` 已排除 `.git`、`.venv`、`data`、`.env` 等，镜像不会包含本地敏感文件。
 
----
-
-## 三、构建镜像（服务器本地构建）
+### 3.2 构建镜像（服务器本地构建）
 
 由于镜像为私有、未推送至公共 Registry，宝塔「编排/拉取」会因 `pull access denied` 失败，**必须先在服务器本地 build**：
 
@@ -41,9 +87,7 @@ docker build -t aliyundrive-sub:latest .
 docker images | grep aliyundrive-sub
 ```
 
----
-
-## 四、在宝塔面板创建容器
+### 3.3 在宝塔面板创建容器
 
 打开 **宝塔面板 → Docker → 容器**，点击「**添加容器**」，按下表填写：
 
@@ -91,7 +135,7 @@ docker images | grep aliyundrive-sub
 
 ---
 
-## 五、验证运行状态
+## 六、验证运行状态
 
 1. 在宝塔「容器」列表查看 `aliyundrive-sub` 状态为「运行中」。
 2. 查看容器日志，应见 Web 启动、调度器与 TG 监控线程初始化输出：
@@ -107,7 +151,7 @@ docker images | grep aliyundrive-sub
 
 ---
 
-## 六、宝塔反向代理（推荐，可选）
+## 七、宝塔反向代理（推荐，可选）
 
 应用**无内置鉴权**，公网暴露前务必加一层保护：
 
@@ -121,8 +165,19 @@ docker images | grep aliyundrive-sub
 
 ---
 
-## 七、常用运维命令
+## 八、常用运维命令
 
+### 编排方式（推荐）
+```bash
+cd aliyundrive-sub
+docker compose ps            # 状态
+docker compose logs -f      # 日志
+docker compose up -d        # 启动 / 应用改动
+docker compose up -d --build  # 代码更新后重建
+docker compose down         # 停止（保留 ./data）
+```
+
+### 手动建容器方式
 ```bash
 # 查看日志
 docker logs -f aliyundrive-sub
@@ -139,16 +194,16 @@ cd aliyundrive-sub
 git pull
 docker build -t aliyundrive-sub:latest .
 docker stop aliyundrive-sub && docker rm aliyundrive-sub
-# 回到第四步「添加容器」重新创建（目录挂载与环境变量保持一致）
+# 回到第六步「添加容器」重新创建（目录挂载与环境变量保持一致）
 ```
 
 ---
 
-## 八、故障排查
+## 九、故障排查
 
 | 现象 | 原因 / 处理 |
 | --- | --- |
-| 宝塔编排报 `pull access denied` | 镜像未推送公共仓库，须按第三步本地 `docker build` 后建容器，勿用编排拉取 |
+| 宝塔编排报 `pull access denied` | `docker-compose.yml` 误用了 `image:` 公共地址。本镜像为私有，请改用 `build:` 段（默认即是）从本地代码构建；仅当你已在服务器手动 `docker build` 后才切到 `image:` |
 | 容器启动后退出 | 查看 `docker logs`，多为 `ALIYUNDRIVE_REFRESH_TOKEN` 错误或缺 tzdata（镜像已含 tzdata，正常不会） |
 | `/healthz` 返回非 200 | 数据库挂载目录权限不足；确认服务器目录已 `mkdir -p` 且容器有写权限 |
 | 调度器/TG 监控不运行 | 确认容器启动命令是 `python app.py`，不是 gunicorn 工厂模式 |
@@ -156,6 +211,6 @@ docker stop aliyundrive-sub && docker rm aliyundrive-sub
 
 ---
 
-## 九、配置项速查（config.py）
+## 十、配置项速查（config.py）
 
 完整可配置环境变量见仓库 `config.py`：`ALIYUNDRIVE_REFRESH_TOKEN`、`DATABASE_URL`、`WEB_HOST`、`WEB_PORT`、`TZ`、`LOG_LEVEL`、`TG_*` 系列（监控/通知）、`ARIA2_*` 系列（远程下载）、`SHARE_EXPIRE_THRESHOLD_DAYS`（临期阈值，默认 7 天）。所有字段均有安全默认值，留空仅影响对应功能不启用。

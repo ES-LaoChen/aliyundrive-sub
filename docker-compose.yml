@@ -1,0 +1,63 @@
+# ============================================================
+#  阿里云盘订阅转存 · 容器编排
+#
+#  用法 A（推荐，从仓库代码本地构建）：
+#    1) 服务器克隆仓库：git clone https://github.com/ES-LaoChen/aliyundrive-sub.git
+#    2) 进入目录：cd aliyundrive-sub
+#    3) 启动：docker compose up -d           # 自动 build + 运行
+#    更新：git pull && docker compose up -d --build
+#
+#  用法 B（已手动 build 过镜像时）：
+#    把下面 build: 整段注释掉，并取消 image: 行的注释。
+#
+#  注意：镜像为私有、未推送公共 Registry，编排无法自动 pull；
+#        因此默认采用 build 段从本地仓库代码构建。
+# ============================================================
+
+services:
+  aliyundrive-sub:
+    # ---- 用法 A：从仓库代码构建 ----
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # ---- 用法 B：已存在本地镜像时改用下面一行（注释掉上面的 build 段） ----
+    # image: aliyundrive-sub:latest
+
+    container_name: aliyundrive-sub
+    restart: unless-stopped
+
+    # 端口映射：服务器端口:容器端口（容器端口固定 8000）
+    ports:
+      - "8000:8000"
+
+    # 持久化：SQLite 数据库与日志落盘，容器重建不丢数据
+    volumes:
+      - ./data:/app/data
+
+    # 环境变量（必填项已标注；其余留空仅影响对应功能）
+    environment:
+      # 【必填】阿里云盘 refresh_token；也可留空后在 Web 设置页填写
+      - ALIYUNDRIVE_REFRESH_TOKEN=
+      - DATABASE_URL=sqlite:////app/data/app.db
+      - WEB_HOST=0.0.0.0
+      - WEB_PORT=8000
+      - TZ=Asia/Shanghai
+      - LOG_LEVEL=INFO
+      # ---- Telegram 频道监控 + 通知（按需） ----
+      - TG_BOT_TOKEN=
+      - TG_MONITOR_ENABLED=false
+      - TG_MONITOR_CHANNELS=
+      - TG_NOTIFY_ENABLED=false
+      - TG_NOTIFY_CHAT_ID=
+      # ---- Aria2 远程下载（按需） ----
+      - ARIA2_RPC_ENABLE=false
+      - ARIA2_RPC_URL=
+      - ARIA2_RPC_SECRET=
+
+    # 复用应用内置 /healthz 做健康检查
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz').status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
