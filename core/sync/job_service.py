@@ -108,19 +108,21 @@ def init_jobs(session, services=None) -> None:
     from core.sync.job_dao import update_job_task_status_by_status
 
     update_job_task_status_by_status(session)
+    sf = getattr(services, "session_factory", None) if services else None
     for item in get_job_list(session):
         try:
-            add_job_client(item, session, is_init=True, services=services)
+            add_job_client(item, session, is_init=True, services=services, session_factory=sf)
         except Exception:
             logger.exception("启动添加作业 %s 失败", getattr(item, "id", "?"))
 
 
-def get_job_client_by_id(session, job_id: int, services=None) -> JobClient:
+def get_job_client_by_id(session, job_id: int, services=None, session_factory=None) -> JobClient:
     job_id = int(job_id)
     if job_id in job_client_list:
         return job_client_list[job_id]
     job = get_job_by_id(session, job_id)
-    client = JobClient(job, session)
+    sf = session_factory or (getattr(services, "session_factory", None) if services else None)
+    client = JobClient(job, session, session_factory=sf)
     if services is not None:
         client.notify_hook = lambda j, st, tn, dt, sz: _notify_with_services(
             services, j, st, tn, dt, sz
@@ -184,14 +186,15 @@ def _session_for():
     return _session_holder["session"]
 
 
-def add_job_client(job: dict, session, is_init=False, services=None):
+def add_job_client(job: dict, session, is_init=False, services=None, session_factory=None):
     from core.sync.job_dao import add_job, get_job_by_id
 
     set_session(session)
     clean_job_input(job)
     job_id = add_job(session, job)
     orm_job = get_job_by_id(session, job_id)
-    client = JobClient(orm_job, session, is_init=is_init)
+    sf = session_factory or (getattr(services, "session_factory", None) if services else None)
+    client = JobClient(orm_job, session, is_init=is_init, session_factory=sf)
     job_client_list[int(client.job_id)] = client
     if services is not None:
         client.notify_hook = lambda j, st, tn, dt, sz: _notify_with_services(
@@ -200,11 +203,12 @@ def add_job_client(job: dict, session, is_init=False, services=None):
     return client
 
 
-def edit_job_client(job: dict, session, services=None):
+def edit_job_client(job: dict, session, services=None, session_factory=None):
     job_id = int(job["id"])
     set_session(session)
     clean_job_input(job)
-    client = get_job_client_by_id(session, job_id, services)
+    sf = session_factory or (getattr(services, "session_factory", None) if services else None)
+    client = get_job_client_by_id(session, job_id, services, session_factory=sf)
     if client.job.enable == 1 and client.job.is_cron != 2:
         raise ValueError("请先禁用作业再编辑")
     clear_snapshot = any(
@@ -220,7 +224,7 @@ def edit_job_client(job: dict, session, services=None):
                 continue
             setattr(new_job_row, k, v)
         session.flush()
-        new_client = JobClient(new_job_row, session)
+        new_client = JobClient(new_job_row, session, session_factory=sf)
         if services is not None:
             new_client.notify_hook = lambda j, st, tn, dt, sz: _notify_with_services(
                 services, j, st, tn, dt, sz
@@ -233,7 +237,7 @@ def edit_job_client(job: dict, session, services=None):
                 pass
         try:
             restored = get_job_by_id(session, job_id)
-            job_client_list[job_id] = JobClient(restored, session)
+            job_client_list[job_id] = JobClient(restored, session, session_factory=sf)
         except Exception:
             logger.exception("恢复作业失败")
         raise
@@ -244,10 +248,11 @@ def do_all_job_manual(session, services=None):
     job_list = get_enable_job_list(session)
     if not job_list:
         raise ValueError("没有可手动运行的作业")
+    sf = getattr(services, "session_factory", None) if services else None
     for job_item in job_list:
-        client = get_job_client_by_id(session, job_item.id, services)
+        client = get_job_client_by_id(session, job_item.id, services, session_factory=sf)
         if client.job.enable == 1:
-            client.do_manual()
+            client.do_manual(session_factory=sf)
 
 
 def pause_all_job(session):
@@ -265,10 +270,11 @@ def continue_all_job(session):
 
 
 def do_job_manual(job_id: int, session, services=None, operator="手动"):
-    client = get_job_client_by_id(session, int(job_id), services)
+    sf = getattr(services, "session_factory", None) if services else None
+    client = get_job_client_by_id(session, int(job_id), services, session_factory=sf)
     if client.job.enable != 1:
         raise ValueError("已禁用的作业不能运行")
-    client.do_manual(operator=operator)
+    client.do_manual(operator=operator, session_factory=sf)
 
 
 def remove_job_client(job_id: int, session):
@@ -280,19 +286,22 @@ def remove_job_client(job_id: int, session):
 
 
 def continue_job(job_id: int, session, services=None):
-    client = get_job_client_by_id(session, int(job_id), services)
+    sf = getattr(services, "session_factory", None) if services else None
+    client = get_job_client_by_id(session, int(job_id), services, session_factory=sf)
     client.resume_job()
 
 
 def pause_job(job_id: int, session, services=None):
-    client = get_job_client_by_id(session, int(job_id), services)
+    sf = getattr(services, "session_factory", None) if services else None
+    client = get_job_client_by_id(session, int(job_id), services, session_factory=sf)
     if client.job.is_cron == 2:
         raise ValueError("手动作业不能禁用")
     client.stop_job()
 
 
 def abort_job(job_id: int, session, services=None):
-    client = get_job_client_by_id(session, int(job_id), services)
+    sf = getattr(services, "session_factory", None) if services else None
+    client = get_job_client_by_id(session, int(job_id), services, session_factory=sf)
     client.abort_job()
 
 
@@ -327,7 +336,8 @@ def get_job_list_view(session, req=None):
 
 
 def get_job_current(job_id: int, session, status=None, services=None):
-    client = get_job_client_by_id(session, int(job_id), services)
+    sf = getattr(services, "session_factory", None) if services else None
+    client = get_job_client_by_id(session, int(job_id), services, session_factory=sf)
     task_client = client.current_job_task
     if task_client is not None:
         if status is None:

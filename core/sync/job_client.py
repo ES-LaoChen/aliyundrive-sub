@@ -804,8 +804,11 @@ class JobTask:
 
 
 class JobClient:
-    def __init__(self, job, session, is_init=False):
+    def __init__(self, job, session, is_init=False, session_factory=None):
         self.session = session
+        # session_factory：供手动触发 / 定时调度在后台线程内重新开 session
+        # 并重新加载 job，避免复用请求级 / 缓存里已 detached 的 SyncJob 实例。
+        self.session_factory = session_factory
         self.job = job
         self.job_id = job.id
         self.scheduled = None
@@ -862,12 +865,42 @@ class JobClient:
             except Exception:
                 logger.exception("同步任务结束通知失败")
 
+    def _reload_job(self, session):
+        """后台线程入口：用本线程 session 重新加载 job，确保 bound。"""
+        from core.sync.job_dao import get_job_by_id
+
+        self.session = session
+        self.job = get_job_by_id(session, self.job_id)
+
+    def _ensure_job_bound(self):
+        """兜底：若 self.job 未绑定当前 session，重新加载。"""
+        if self.job is None or self.job not in self.session:
+            from core.sync.job_dao import get_job_by_id
+
+            self.job = get_job_by_id(self.session, self.job_id)
+
     def do_job(self, lock_acquired=False, operator=None):
         if not lock_acquired and not self.run_lock.acquire(blocking=False):
             return
         if operator:
             self.operator = operator
         self.job_doing = True
+
+        # 优先走「后台线程内自有 session」路径：手动触发与定时调度共用，
+        # 保证 SyncJob 在执行期间始终 bound 到存活 session，杜绝
+        # "Instance is not bound to a Session" 的 attribute refresh 报错。
+        if self.session_factory is not None:
+            with self.session_factory() as session:
+                self._reload_job(session)
+                self._run_job_inner()
+            return
+
+        # 兜底（无 factory 时）：依赖调用方已保证 session 存活。
+        self._ensure_job_bound()
+        self._run_job_inner()
+
+    def _run_job_inner(self):
+        """在「已绑定 session」的上下文中执行一次同步（线程安全边界）。"""
         task_id = None
         try:
             task_id = add_job_task(self.session, {
@@ -879,22 +912,41 @@ class JobClient:
             task = JobTask(task_id, self)
             self.current_job_task = task
             task.start()
+            # 阻塞等待后台 sync / submit 子线程结束，确保 self.session 的
+            # 生命周期完整覆盖整个扫描 + 复制 + 落库过程（子线程均使用 self.session）。
+            task.sync_thread.join()
+            task.submit_thread.join()
+            self.session.commit()
         except Exception as e:
             self.finish_run()
             err_msg = G.do_job_err.format(str(e))
             logger.error(err_msg)
             if task_id is not None:
                 update_job_task_status(self.session, task_id, 6, err_msg)
+                try:
+                    self.session.commit()
+                except Exception:
+                    pass
             logger.exception(e)
 
-    def do_manual(self, operator="手动"):
+    def do_manual(self, operator="手动", session_factory=None):
         if not self.run_lock.acquire(blocking=False):
             raise Exception(G.job_running)
         self.operator = operator or "手动"
         self.job_doing = True
+        sf = session_factory or self.session_factory
+
+        def _run():
+            if sf is not None:
+                with sf() as session:
+                    self._reload_job(session)
+                    self.do_job(lock_acquired=True, operator=self.operator)
+            else:
+                # 兜底：无 factory 时直接跑（调用方需保证传入的 session 存活）。
+                self.do_job(lock_acquired=True, operator=self.operator)
+
         do_job_thread = threading.Thread(
-            target=self.do_job, kwargs={"lock_acquired": True, "operator": self.operator},
-            name="job-manual-" + str(self.job_id), daemon=True
+            target=_run, name="job-manual-" + str(self.job_id), daemon=True
         )
         do_job_thread.start()
 

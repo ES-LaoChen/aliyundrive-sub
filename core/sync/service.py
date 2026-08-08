@@ -46,9 +46,10 @@ class SyncService:
 
     # ---- 手动触发 / 启停 ----
     def do_job_manual(self, job_id: int, operator="手动"):
+        # 仅用于取 / 建 JobClient（缓存命中时只读 identity map）；实际执行在
+        # JobClient.do_manual 启动的后台线程内自行开 session 并 commit，不在此长事务中。
         with self.session_factory() as session:
             job_service.do_job_manual(job_id, session, services=self.services, operator=operator)
-            session.commit()
 
     def abort_job(self, job_id: int):
         with self.session_factory() as session:
@@ -68,7 +69,6 @@ class SyncService:
     def do_all_manual(self):
         with self.session_factory() as session:
             job_service.do_all_job_manual(session, services=self.services)
-            session.commit()
 
     def pause_all(self):
         with self.session_factory() as session:
