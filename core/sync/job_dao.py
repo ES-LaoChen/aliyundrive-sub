@@ -11,6 +11,7 @@ from models_sync import (
     SOURCE_SNAPSHOT_FIELDS,
     SyncJob,
     SyncMoveLog,
+    SyncProgress,
     SyncRecord,
     SyncSourceSnapshot,
     SyncSourceSnapshotMeta,
@@ -441,4 +442,228 @@ def get_all_sync_records(db, params: dict = None) -> list:
     if st > 0:
         query = query.filter(SyncRecord.startTime <= st)
     return query.order_by(SyncRecord.startTime.desc(), SyncRecord.id.desc()).all()
+
+
+# ---------- 实时进度（sync_progress） ----------
+
+# 进度状态语义（与 SyncProgress.status 对齐）。
+PROGRESS_STATUS_PENDING = 0
+PROGRESS_STATUS_RUNNING = 1
+PROGRESS_STATUS_SUCCESS = 2
+PROGRESS_STATUS_ABORTED = 4
+PROGRESS_STATUS_FAILED = 7
+
+
+def upsert_progress(db, task_id: int, job_id: int, item: dict) -> None:
+    """单条 upsert 进度（按 (taskId, fileName, srcPath) 唯一键）。
+
+    大规模同步时请改用 :func:`bulk_upsert_progress` 批量节流写入。
+    """
+    now = int(time.time())
+    existing = (
+        db.query(SyncProgress)
+        .filter_by(taskId=task_id, fileName=item.get("fileName", ""),
+                   srcPath=item.get("srcPath", ""))
+        .first()
+    )
+    if existing is None:
+        db.add(SyncProgress(
+            jobId=job_id, taskId=task_id,
+            fileName=item.get("fileName", ""),
+            srcPath=item.get("srcPath", ""),
+            dstPath=item.get("dstPath", ""),
+            fileSize=item.get("fileSize"),
+            status=item.get("status", 0),
+            progress=item.get("progress", 0),
+            speed=item.get("speed", 0),
+            transferred=item.get("transferred", 0),
+            startedAt=item.get("startedAt", now),
+            updatedAt=now,
+            finishedAt=item.get("finishedAt", 0),
+            errMsg=item.get("errMsg", "") or "",
+        ))
+    else:
+        existing.fileSize = item.get("fileSize", existing.fileSize)
+        existing.dstPath = item.get("dstPath", existing.dstPath)
+        existing.status = item.get("status", existing.status)
+        existing.progress = item.get("progress", existing.progress)
+        existing.speed = item.get("speed", existing.speed)
+        existing.transferred = item.get("transferred", existing.transferred)
+        existing.updatedAt = now
+        if item.get("finishedAt"):
+            existing.finishedAt = item.get("finishedAt")
+        if item.get("errMsg"):
+            existing.errMsg = item.get("errMsg", "")
+
+
+def bulk_upsert_progress(db, task_id: int, job_id: int, items: list) -> None:
+    """批量 upsert 进度（节流写入入口）。
+
+    内部用 bulk_save_objects 减少 ORM 开销；单文件级 update 通过先查后写实现
+    （已存在的按唯一键更新，不存在的新增）。大规模场景由调用方控制调用频率
+    （如每 1s 或每 50 条 flush 一次），避免每文件一写。
+    """
+    if not items:
+        return
+    now = int(time.time())
+    # 批量取出本 task 已存在记录建 map，减少 N+1 查询。
+    existing_map = {}
+    rows = db.query(SyncProgress).filter_by(taskId=task_id).all()
+    for r in rows:
+        existing_map[(r.fileName, r.srcPath)] = r
+    new_objs = []
+    for it in items:
+        key = (it.get("fileName", ""), it.get("srcPath", ""))
+        existing = existing_map.get(key)
+        if existing is None:
+            new_objs.append(SyncProgress(
+                jobId=job_id, taskId=task_id,
+                fileName=it.get("fileName", ""),
+                srcPath=it.get("srcPath", ""),
+                dstPath=it.get("dstPath", ""),
+                fileSize=it.get("fileSize"),
+                status=it.get("status", 0),
+                progress=it.get("progress", 0),
+                speed=it.get("speed", 0),
+                transferred=it.get("transferred", 0),
+                startedAt=it.get("startedAt", now),
+                updatedAt=now,
+                finishedAt=it.get("finishedAt", 0),
+                errMsg=it.get("errMsg", "") or "",
+            ))
+        else:
+            existing.fileSize = it.get("fileSize", existing.fileSize)
+            existing.dstPath = it.get("dstPath", existing.dstPath)
+            existing.status = it.get("status", existing.status)
+            existing.progress = it.get("progress", existing.progress)
+            existing.speed = it.get("speed", existing.speed)
+            existing.transferred = it.get("transferred", existing.transferred)
+            existing.updatedAt = now
+            if it.get("finishedAt"):
+                existing.finishedAt = it.get("finishedAt")
+            if it.get("errMsg"):
+                existing.errMsg = it.get("errMsg", "")
+    if new_objs:
+        db.add_all(new_objs)
+
+
+def get_progress_summary(db, task_id: int, job_id: int = None) -> dict:
+    """聚合进度统计（SQL 计数，不全表拉取，适合大规模文件）。
+
+    返回：
+      - total/running/success/failed/aborted/pending 计数
+      - transferred 与 totalSize 字节汇总（近似，基于 fileSize）
+      - percent：整体进度百分比（0-100），扫描未完成时基于已完成/(已完成+待处理)
+      - recovered：本次运行基于「历史已移动/已完成」恢复的基数（见调用方传入）
+    """
+    from sqlalchemy import func
+
+    q = db.query(SyncProgress.status, func.count(SyncProgress.id))
+    if task_id:
+        q = q.filter_by(taskId=task_id)
+    elif job_id is not None:
+        q = q.filter_by(jobId=job_id)
+    counts = {status: cnt for status, cnt in q.group_by(SyncProgress.status).all()}
+
+    running = counts.get(PROGRESS_STATUS_RUNNING, 0)
+    success = counts.get(PROGRESS_STATUS_SUCCESS, 0)
+    failed = counts.get(PROGRESS_STATUS_FAILED, 0)
+    aborted = counts.get(PROGRESS_STATUS_ABORTED, 0)
+    pending = counts.get(PROGRESS_STATUS_PENDING, 0)
+    done = success + failed + aborted
+    total = done + running + pending
+
+    size_row = (
+        db.query(
+            func.coalesce(func.sum(SyncProgress.fileSize), 0),
+            func.coalesce(func.sum(SyncProgress.transferred), 0),
+        )
+        .filter_by(taskId=task_id) if task_id else
+        db.query(
+            func.coalesce(func.sum(SyncProgress.fileSize), 0),
+            func.coalesce(func.sum(SyncProgress.transferred), 0),
+        ).filter_by(jobId=job_id)
+    ).first()
+    total_size = int(size_row[0] or 0)
+    transferred_size = int(size_row[1] or 0)
+
+    percent = 0
+    if total > 0:
+        percent = int(round(done * 100.0 / total))
+    return {
+        "total": total,
+        "running": running,
+        "success": success,
+        "failed": failed,
+        "aborted": aborted,
+        "pending": pending,
+        "done": done,
+        "totalSize": total_size,
+        "transferredSize": transferred_size,
+        "percent": percent,
+    }
+
+
+def get_progress_active(db, task_id: int, limit: int = 20) -> list:
+    """返回正在传输中的文件（最多 limit 条，供 UI 展示当前明细）。"""
+    rows = (
+        db.query(SyncProgress)
+        .filter_by(taskId=task_id, status=PROGRESS_STATUS_RUNNING)
+        .order_by(SyncProgress.updatedAt.desc())
+        .limit(limit)
+        .all()
+    )
+    return [{
+        "fileName": r.fileName,
+        "srcPath": r.srcPath,
+        "dstPath": r.dstPath,
+        "fileSize": r.fileSize,
+        "progress": r.progress,
+        "speed": r.speed,
+        "transferred": r.transferred,
+        "status": r.status,
+        "errMsg": r.errMsg,
+    } for r in rows]
+
+
+def get_progress_recent_done(db, task_id: int, limit: int = 50) -> list:
+    """返回最近完成的文件（成功/失败，最多 limit 条，供 UI 滚动展示）。"""
+    rows = (
+        db.query(SyncProgress)
+        .filter(SyncProgress.taskId == task_id,
+                SyncProgress.status.in_((PROGRESS_STATUS_SUCCESS, PROGRESS_STATUS_FAILED)))
+        .order_by(SyncProgress.finishedAt.desc())
+        .limit(limit)
+        .all()
+    )
+    return [{
+        "fileName": r.fileName,
+        "srcPath": r.srcPath,
+        "dstPath": r.dstPath,
+        "fileSize": r.fileSize,
+        "status": r.status,
+        "errMsg": r.errMsg,
+        "finishedAt": r.finishedAt,
+    } for r in rows]
+
+
+def count_progress_recovered(db, job_id: int, current_task_id: int) -> int:
+    """恢复基数：上次运行中已成功（status=2）的文件数。
+
+    用于「中断恢复显示」：本次运行开始前，先把历史已成功文件数计入进度分母，
+    使得重启/中止后续跑时整体进度百分比能正确反映「跨运行累计完成度」。
+    """
+    return (
+        db.query(SyncProgress)
+        .filter_by(jobId=job_id, status=PROGRESS_STATUS_SUCCESS)
+        .filter(SyncProgress.taskId != current_task_id)
+        .count()
+    )
+
+
+def clear_progress_by_task(db, task_id: int) -> None:
+    """清理指定 task 的进度记录（作业删除/历史清理时使用）。"""
+    db.query(SyncProgress).filter_by(taskId=task_id).delete(
+        synchronize_session=False
+    )
 

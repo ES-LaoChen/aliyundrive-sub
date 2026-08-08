@@ -86,6 +86,7 @@
                 <button class="mini" type="submit">中止</button>
               </form>
               <a class="mini" href="{{ url_for('sync.edit', job_id=j.id) }}">编辑</a>
+              <a class="mini" href="{{ url_for('sync.progress', job_id=j.id) }}">进度</a>
               <form method="post" action="{{ url_for('sync.delete', job_id=j.id) }}" onsubmit="return confirm('确认删除该作业？');">
                 <button class="mini danger" type="submit">删除</button>
               </form>

@@ -355,6 +355,48 @@ class SyncRecord(Base):
     )
 
 
+# ============================================================
+# 同步进度（sync_progress）：实时文件级进度中间表（持久化）。
+# 每个待处理/正在传输/已完成文件一条记录，供 Web 轮询与 CLI 实时展示，
+# 并支持进程崩溃后基于「已完成文件数」精确恢复进度基数。
+# 写入采用批量 + 节流（见 core.sync.job_dao.bulk_upsert_progress），
+# 避免大规模文件同步时高频写库导致界面/IO 卡顿。
+# ============================================================
+class SyncProgress(Base):
+    """同步进度中间表：文件级实时状态（status/progress/speed/transferred）。"""
+
+    __tablename__ = "sync_progress"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # 关联作业与任务（taskId 区分每次运行；同 job 多次运行的进度按 taskId 隔离）。
+    jobId: Mapped[int] = mapped_column(Integer, index=True, default=0)
+    taskId: Mapped[int] = mapped_column(Integer, index=True, default=0)
+    # 文件标识。
+    fileName: Mapped[str] = mapped_column(Text, default="")
+    srcPath: Mapped[str] = mapped_column(Text, default="")
+    dstPath: Mapped[str] = mapped_column(Text, default="")
+    # 文件总字节数（移动模式即源文件大小）；未知时为 NULL。
+    fileSize: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # status：0-待处理 1-传输中 2-成功 4-中止 7-失败。
+    status: Mapped[int] = mapped_column(Integer, default=0)
+    # progress：0-100（基于 alist 复制任务百分比近似）。
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    # speed：瞬时速度（字节/秒，基于 progress×fileSize 采样近似）；未知为 0。
+    speed: Mapped[int] = mapped_column(Integer, default=0)
+    # transferred：已传输字节（progress% × fileSize 近似）。
+    transferred: Mapped[int] = mapped_column(Integer, default=0)
+    # 时间（Unix 秒）。
+    startedAt: Mapped[int] = mapped_column(Integer, default=0)
+    updatedAt: Mapped[int] = mapped_column(Integer, default=0)
+    finishedAt: Mapped[int] = mapped_column(Integer, default=0)
+    errMsg: Mapped[str] = mapped_column(Text, default="")
+
+    __table_args__ = (
+        Index("ix_sync_progress_job", "jobId"),
+        Index("ix_sync_progress_task", "taskId"),
+    )
+
+
 def sync_source_snapshot_identity(job) -> dict:
     """从 job 提取源快照身份（与 TaoSync jobMapper.sourceSnapshotIdentity 一致）。"""
     fields = (

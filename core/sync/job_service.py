@@ -346,6 +346,23 @@ def get_job_current(job_id: int, session, status=None, services=None):
     return None
 
 
+def get_job_progress(job_id: int, session, services=None):
+    """聚合同步作业实时进度（持久化中间表），供 Web/CLI 展示与中断恢复。
+
+    恢复基数：上次运行中已成功文件数（跨运行累计完成度）。
+    """
+    sf = getattr(services, "session_factory", None) if services else None
+    client = get_job_client_by_id(session, int(job_id), services, session_factory=sf)
+    current = client.current_job_task
+    current_task_id = current.task_id if current is not None else 0
+    recovered = 0
+    if current_task_id:
+        from core.sync.job_dao import count_progress_recovered
+
+        recovered = count_progress_recovered(session, int(job_id), current_task_id)
+    return client.get_progress(recovered_base=recovered)
+
+
 def set_session(session) -> None:
     """供 clean_job_input 内重叠检测临时取用（不推荐并发使用）。"""
     _session_holder["session"] = session

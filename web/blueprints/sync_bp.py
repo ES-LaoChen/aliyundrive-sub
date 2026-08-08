@@ -231,6 +231,35 @@ def current():
     return jsonify(data)
 
 
+@bp.route("/<int:job_id>/progress", methods=["GET"])
+def progress(job_id: int):
+    """同步实时进度面板（HTML）。"""
+    svc = _services()
+    try:
+        with svc.session_factory() as db:
+            job = get_job_by_id(db, job_id)
+        if job is None:
+            flash("作业不存在", "error")
+            return redirect(url_for("sync.index"))
+        job_view = {k: v for k, v in job.__dict__.items() if not k.startswith("_")}
+    except Exception:
+        logger.exception("读取同步作业失败")
+        job_view = {"id": job_id, "remark": ""}
+    return render_template("sync_progress.html", job=job_view)
+
+
+@bp.route("/<int:job_id>/progress-json", methods=["GET"])
+def progress_json(job_id: int):
+    """同步实时进度（JSON），供前端轮询。无运行任务时返回 running=false。"""
+    svc = _services()
+    try:
+        data = svc.sync_service.get_job_progress(job_id)
+    except Exception as exc:
+        logger.exception("读取同步进度失败")
+        return jsonify(error=str(exc)), 500
+    return jsonify(data)
+
+
 def _session(svc):
     # 复用 sync_service 的 session_factory 取一次性会话。
     holder = {"db": None}

@@ -89,6 +89,10 @@ class SyncService:
         with self.session_factory() as session:
             return job_service.get_job_current(job_id, session, status, self.services)
 
+    def get_job_progress(self, job_id: int):
+        with self.session_factory() as session:
+            return job_service.get_job_progress(job_id, session, self.services)
+
     # ---- 同步记录（历史日志）编排 ----
     def add_sync_record(self, record: dict) -> int:
         with self.session_factory() as session:

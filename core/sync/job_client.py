@@ -120,6 +120,12 @@ class CopyItem:
         self.alist_task_id = None
         self.status = 0
         self.progress = 0.0
+        # 速度/剩余时间近似推算所需字段：
+        #  - start_time：开始传输时刻（Unix 秒，浮点）
+        #  - last_sample：上次采样 (时间, 已传字节)，用于算瞬时速度
+        self.start_time = None
+        self.last_sample = None
+        self.speed = 0
         self.err_msg = None
         self.create_time = int(time.time())
         self.doing_key = None
@@ -128,7 +134,27 @@ class CopyItem:
         do_thread = threading.Thread(target=self.do_it, name="copy-item-" + str(self.task_id), daemon=True)
         do_thread.start()
 
+    def _sample_speed(self):
+        """基于 progress%(×file_size) 的采样差估算瞬时速度（字节/秒）。"""
+        now = time.time()
+        transferred = (self.progress or 0) / 100.0 * (self.file_size or 0)
+        if self.start_time is None:
+            self.start_time = now
+            self.last_sample = (now, transferred)
+            return
+        if self.last_sample is None:
+            self.last_sample = (now, transferred)
+            return
+        prev_t, prev_bytes = self.last_sample
+        dt = now - prev_t
+        if dt <= 0:
+            return
+        self.speed = int(max(0, (transferred - prev_bytes) / dt))
+        self.last_sample = (now, transferred)
+
     def do_it(self):
+        self.start_time = time.time()
+        self.last_sample = (self.start_time, 0)
         try:
             if self.job_task.break_flag:
                 self.status = 4
@@ -173,6 +199,8 @@ class CopyItem:
             self.status = task_info["state"]
             self.progress = task_info["progress"]
             self.err_msg = task_info["error"] if task_info["error"] else None
+            self._sample_speed()
+            self.job_task.record_progress(self)
             if task_info["state"] in (2, 4, 7):
                 try:
                     self.alist_client.copy_task_delete(self.alist_task_id)
@@ -214,8 +242,128 @@ class JobTask:
             load_moved_file_names(vm.session, self.job.id)
             if self.job.method == 2 else set()
         )
+        # 进度缓冲：record_progress 写入内存 buffer，由 _flush_progress 节流落盘，
+        # 避免大规模文件同步时每文件一次 DB 写导致 IO / 界面卡顿。
+        self._progress_buffer = {}
+        self._progress_flush_at = 0.0
+        self._progress_flush_interval = 1.0  # 秒：节流落盘间隔
+        self._progress_flush_max = 200       # 条：buffer 上限，达此即强制 flush
         self.sync_thread = threading.Thread(target=self.sync, name="job-sync-" + str(task_id), daemon=True)
         self.submit_thread = threading.Thread(target=self.task_submit, name="job-submit-" + str(task_id), daemon=True)
+
+    # ---------- 实时进度（持久化中间表） ----------
+    def record_progress(self, copy_item) -> None:
+        """记录/更新单个文件的实时进度到内存 buffer（节流落盘）。
+
+        copy_item 提供 fileName/src_path/dst_path/file_size/status/progress/speed。
+        进度状态映射：0-待 1-传输中 2-成功 4-中止 7-失败。
+        """
+        from core.sync.job_dao import (
+            PROGRESS_STATUS_ABORTED,
+            PROGRESS_STATUS_FAILED,
+            PROGRESS_STATUS_RUNNING,
+            PROGRESS_STATUS_SUCCESS,
+        )
+
+        status_map = {0: 0, 1: 1, 2: 2, 3: 1, 4: 4, 7: 7}
+        mapped = status_map.get(int(copy_item.status), 1)
+        now = int(time.time())
+        key = (copy_item.file_name, copy_item.src_path)
+        prev = self._progress_buffer.get(key)
+        item = {
+            "fileName": copy_item.file_name,
+            "srcPath": copy_item.src_path,
+            "dstPath": copy_item.dst_path,
+            "fileSize": copy_item.file_size,
+            "status": mapped,
+            "progress": int(copy_item.progress or 0),
+            "speed": int(getattr(copy_item, "speed", 0) or 0),
+            "transferred": int((copy_item.progress or 0) / 100.0 * (copy_item.file_size or 0)),
+            "startedAt": prev.get("startedAt") if prev else now,
+            "finishedAt": now if mapped in (PROGRESS_STATUS_SUCCESS, PROGRESS_STATUS_FAILED, PROGRESS_STATUS_ABORTED) else 0,
+            "errMsg": copy_item.err_msg or "",
+        }
+        self._progress_buffer[key] = item
+
+        now_f = time.time()
+        if (now_f - self._progress_flush_at >= self._progress_flush_interval
+                or len(self._progress_buffer) >= self._progress_flush_max):
+            self._flush_progress()
+
+    def _flush_progress(self) -> None:
+        """把内存 buffer 批量 upsert 到 sync_progress（节流写入）。"""
+        if not self._progress_buffer:
+            return
+        try:
+            from core.sync.job_dao import bulk_upsert_progress
+
+            session = self.job_client.session
+            bulk_upsert_progress(
+                session, self.task_id, self.job.id,
+                list(self._progress_buffer.values()),
+            )
+            session.commit()
+            self._progress_buffer.clear()
+            self._progress_flush_at = time.time()
+        except Exception:
+            logger.exception("刷新同步进度失败（忽略，下个周期重试）")
+
+    def _record_progress_simple(self, name, src_path, dst_path, size, status, err_msg) -> None:
+        """记录非 CopyItem 来源的文件级进度（目录标记 / 扫描错误 / 移动删除失败）。"""
+        from core.sync.job_dao import (
+            PROGRESS_STATUS_ABORTED,
+            PROGRESS_STATUS_FAILED,
+            PROGRESS_STATUS_RUNNING,
+            PROGRESS_STATUS_SUCCESS,
+        )
+
+        status_map = {0: 0, 1: 1, 2: 2, 3: 1, 4: 4, 7: 7}
+        mapped = status_map.get(int(status), 1)
+        now = int(time.time())
+        key = (name, src_path)
+        prev = self._progress_buffer.get(key)
+        item = {
+            "fileName": name,
+            "srcPath": src_path,
+            "dstPath": dst_path or "",
+            "fileSize": size,
+            "status": mapped,
+            "progress": 100 if mapped == PROGRESS_STATUS_SUCCESS else 0,
+            "speed": 0,
+            "transferred": size if mapped == PROGRESS_STATUS_SUCCESS else 0,
+            "startedAt": prev.get("startedAt") if prev else now,
+            "finishedAt": now if mapped in (PROGRESS_STATUS_SUCCESS, PROGRESS_STATUS_FAILED, PROGRESS_STATUS_ABORTED) else 0,
+            "errMsg": err_msg or "",
+        }
+        self._progress_buffer[key] = item
+        now_f = time.time()
+        if (now_f - self._progress_flush_at >= self._progress_flush_interval
+                or len(self._progress_buffer) >= self._progress_flush_max):
+            self._flush_progress()
+
+    def _record_pending(self) -> None:
+        """扫描完成后：对尚未进入 doing/waiting/finish 的文件，标记为待处理。
+
+        用于「总数」估算——扫描发现但还在排队未开始传输的文件计入 pending。
+        """
+        now = int(time.time())
+        for ci in self.waiting:
+            key = (ci.file_name, ci.src_path)
+            if key not in self._progress_buffer:
+                self._progress_buffer[key] = {
+                    "fileName": ci.file_name,
+                    "srcPath": ci.src_path,
+                    "dstPath": ci.dst_path,
+                    "fileSize": ci.file_size,
+                    "status": 0,
+                    "progress": 0,
+                    "speed": 0,
+                    "transferred": 0,
+                    "startedAt": now,
+                    "finishedAt": 0,
+                    "errMsg": "",
+                }
+        self._flush_progress()
 
     def start(self):
         self.sync_thread.start()
@@ -298,6 +446,8 @@ class JobTask:
                     waiting_nums = len(self.waiting)
             else:
                 break
+        # 扫描完成、队列排空后：把还在等待队列的文件标记为「待处理」，完善进度总数。
+        self._record_pending()
         try_time = 0
         while len(self.doing.keys()) > 0:
             try_time += 1
@@ -312,6 +462,8 @@ class JobTask:
                 add_job_task_item_many(self.job_client.session, self.finish)
             self.update_task_status()
         finally:
+            # 确保所有进度 buffer 落盘，供 Web/CLI 实时读取与中断恢复。
+            self._flush_progress()
             self.job_client.finish_run(self)
 
     def _all_operations_successful(self):
@@ -439,6 +591,10 @@ class JobTask:
             "errMsg": err_msg,
             "createTime": create_time,
         })
+        # 记录进度（目录标记 / 扫描错误 / 移动删除失败等非 CopyItem 来源的文件级事件）。
+        # CopyItem 自身的进度由 check_and_get_status 处理；此处覆盖其余路径。
+        if not is_path and name:
+            self._record_progress_simple(name, src_path, dst_path, size, status, err_msg)
 
     def del_hook(self, dst_path, name, size, status=2, err_msg=None, is_path=0, create_time=int(time.time())):
         self.finish.append({
@@ -1000,6 +1156,51 @@ class JobClient:
     def abort_job(self):
         if self.current_job_task:
             self.current_job_task.break_flag = True
+
+    def get_progress(self, recovered_base: int = 0) -> dict:
+        """聚合实时进度（持久化 sync_progress），供 Web 轮询 / CLI 展示。
+
+        recovered_base：本次运行基于「历史已成功文件数」的恢复基数（中断恢复显示），
+        计入整体进度的「已完成」分母，使跨运行累计完成度正确。
+        """
+        from core.sync.job_dao import (
+            get_progress_active,
+            get_progress_recent_done,
+            get_progress_summary,
+        )
+
+        task = self.current_job_task
+        if task is None:
+            return {
+                "running": False,
+                "taskId": None,
+                "summary": {"total": 0, "running": 0, "success": 0, "failed": 0,
+                            "aborted": 0, "pending": 0, "done": 0, "totalSize": 0,
+                            "transferredSize": 0, "percent": 0},
+                "active": [], "recentDone": [], "recovered": recovered_base,
+                "scanFinish": False,
+            }
+        task_id = task.task_id
+        session = self.session
+        summary = get_progress_summary(session, task_id)
+        # 整体进度叠加恢复基数：已完成 = 本次 done + 历史 recovered。
+        done_with_recovered = summary["done"] + recovered_base
+        total_with_recovered = summary["total"] + recovered_base
+        percent = 0
+        if total_with_recovered > 0:
+            percent = int(round(done_with_recovered * 100.0 / total_with_recovered))
+        summary["done"] = done_with_recovered
+        summary["total"] = total_with_recovered
+        summary["percent"] = percent
+        return {
+            "running": True,
+            "taskId": task_id,
+            "summary": summary,
+            "active": get_progress_active(session, task_id),
+            "recentDone": get_progress_recent_done(session, task_id),
+            "recovered": recovered_base,
+            "scanFinish": task.scan_finish,
+        }
 
     def stop_job(self, remove=False):
         self.job.enable = 0
