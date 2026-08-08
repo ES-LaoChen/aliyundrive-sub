@@ -25,7 +25,10 @@ from core.sync_storage.factory import SECRET_FIELDS, createDriver, getDriverType
 from core.sync_storage.pathIdentity import mount_paths_overlap, virtual_paths_overlap
 from models_sync import SyncEngine, SyncStorageMount
 
-MOUNT_NAME_PATTERN = re.compile(r"^[^\\/:\x00-\x1f]+$")
+# 挂载名是虚拟路径中的「节点名」（如 /local/media 中的 local、media）。
+# 禁止路径分隔符（/ \）、虚拟路径分隔符（:）、以及控制字符；
+# 允许中英文、数字、空格、点、连字符、下划线等常见命名字符。
+MOUNT_NAME_PATTERN = re.compile(r"^[^\x00-\x1f\\/:]+$")
 
 # 内置 taosync 系统引擎的 remark / systemKey（与 TaoSync 一致）。
 SYSTEM_ENGINE_REMARK = "TaoSync"
@@ -62,7 +65,10 @@ def get_system_engine_id(db) -> int:
 def _clean_name(name):
     name = str(name or "").strip()
     if not name or name in (".", "..") or not MOUNT_NAME_PATTERN.match(name):
-        raise ValueError("invalid storage directory name")
+        raise ValueError(
+            "无效的存储目录名称：不能包含 \\ / : 等路径分隔符或控制字符"
+            "（名称只是挂载标签，如 local、媒体盘，并非路径）"
+        )
     return name
 
 

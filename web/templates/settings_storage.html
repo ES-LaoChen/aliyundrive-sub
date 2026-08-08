@@ -8,7 +8,7 @@
   <div class="section-head"><h2>新增存储目录</h2><span class="cell-sub">引擎 ID {{ engine_id }}</span></div>
   <form method="post" action="{{ url_for('settings.storage_add') }}">
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-      <label>名称<span class="required-mark">*</span><input name="name" required placeholder="挂载名，如 local / media"></label>
+      <label>名称<span class="required-mark">*</span><input name="name" required placeholder="挂载名（标签），如 local、media、媒体盘"></label>
       <label>驱动类型<span class="required-mark">*</span>
         <select name="driverType">
           {% for d in drivers %}<option value="{{ d }}">{{ d }}</option>{% endfor %}
