@@ -29,44 +29,56 @@ class SyncService:
     # ---- 作业 CRUD 编排 ----
     def add_job(self, job: dict):
         with self.session_factory() as session:
-            return job_service.add_job_client(job, session, services=self.services)
+            result = job_service.add_job_client(job, session, services=self.services)
+            session.commit()
+            return result
 
     def edit_job(self, job: dict):
         with self.session_factory() as session:
-            return job_service.edit_job_client(job, session, services=self.services)
+            result = job_service.edit_job_client(job, session, services=self.services)
+            session.commit()
+            return result
 
     def remove_job(self, job_id: int):
         with self.session_factory() as session:
             job_service.remove_job_client(job_id, session)
+            session.commit()
 
     # ---- 手动触发 / 启停 ----
     def do_job_manual(self, job_id: int):
         with self.session_factory() as session:
             job_service.do_job_manual(job_id, session, services=self.services)
+            session.commit()
 
     def abort_job(self, job_id: int):
         with self.session_factory() as session:
             job_service.abort_job(job_id, session, services=self.services)
+            session.commit()
 
     def pause_job(self, job_id: int):
         with self.session_factory() as session:
             job_service.pause_job(job_id, session, services=self.services)
+            session.commit()
 
     def continue_job(self, job_id: int):
         with self.session_factory() as session:
             job_service.continue_job(job_id, session, services=self.services)
+            session.commit()
 
     def do_all_manual(self):
         with self.session_factory() as session:
             job_service.do_all_job_manual(session, services=self.services)
+            session.commit()
 
     def pause_all(self):
         with self.session_factory() as session:
             job_service.pause_all_job(session)
+            session.commit()
 
     def continue_all(self):
         with self.session_factory() as session:
             job_service.continue_all_job(session)
+            session.commit()
 
     # ---- 查询 ----
     def get_job_list_view(self, req=None):

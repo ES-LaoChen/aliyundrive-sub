@@ -57,7 +57,7 @@ def get_latest_job_task_list(db, job_ids: list) -> list:
         task = (
             db.query(SyncTask)
             .filter_by(jobId=job_id)
-            .order_by(SyncTask.createTime.desc(), SyncTask.id.desc())
+            .order_by(SyncTask.runTime.desc(), SyncTask.id.desc())
             .first()
         )
         if task is None:
@@ -258,7 +258,7 @@ def get_job_task_list(db, params: dict):
     size = int(params.get("pageSize", 20))
     query = db.query(SyncTask).filter_by(jobId=job_id)
     total = query.count()
-    rows = query.order_by(SyncTask.createTime.desc()).limit(size).offset((page - 1) * size).all()
+    rows = query.order_by(SyncTask.runTime.desc()).limit(size).offset((page - 1) * size).all()
     return {"dataList": rows, "total": total, "pageNum": page, "pageSize": size}
 
 
