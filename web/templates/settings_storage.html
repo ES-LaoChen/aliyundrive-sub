@@ -15,15 +15,27 @@
         </select>
       </label>
     </div>
-    <label>配置(JSON)<textarea name="config" placeholder='本地示例：{}&#10;阿里云盘示例：{"refresh_token":"xxx","drive_type":"resource"}'></textarea></label>
+    <label>配置(JSON)<textarea id="config-json" name="config" placeholder='本地示例：{}&#10;阿里云盘示例：{"refresh_token":"xxx","drive_type":"resource"}'></textarea></label>
     <p class="hint">
       各驱动配置字段：<br>
-      • <code>local</code>：<code>{"root_path":"/绝对/目录/路径"}</code>（必填，本地文件系统根）<br>
+      • <code>local</code>：<code>{"root_path":"/绝对/目录/路径"}</code>（必填，本地文件系统根；也可用下方「浏览本地目录」选取）<br>
       • <code>aliyun</code>：<code>refresh_token</code>、<code>drive_type</code>(resource/backup)、<code>api_url</code>、<code>oauth_url</code><br>
       • <code>ftp</code>：<code>host</code>、<code>port</code>、<code>username</code>、<code>password</code>、<code>use_tls</code><br>
       • <code>sftp</code>：<code>host</code>、<code>port</code>、<code>username</code>、<code>password</code> 或 <code>private_key</code>+<code>private_key_passphrase</code><br>
       • <code>smb</code>：<code>host</code>、<code>port</code>、<code>username</code>、<code>password</code>、<code>share</code>、<code>domain</code>
     </p>
+
+    {# local 驱动的 root_path 可通过目录浏览器选取，避免手动输入错误 #}
+    <div id="local-root-row" hidden>
+      <label>本地根目录(root_path)<span class="required-mark">*</span>
+        <input type="text" id="local-root-path" placeholder="/绝对/目录/路径" readonly>
+      </label>
+      {% from "partials/storage_picker.html" import storage_picker %}
+      {{ storage_picker(field_prefix="localroot", target_input_id="local-root-path",
+                        backend="local", open_btn_id="localroot-open", title="选择本地根目录") }}
+      <p class="hint">浏览服务器本地文件系统，选定后自动填入上方「本地根目录」并写入配置 JSON。</p>
+    </div>
+
     <label class="inline"><input type="checkbox" name="enabled" value="1" checked>启用此存储目录</label>
     <div class="form-actions">
       <button type="submit" class="btn primary">添加</button>
@@ -65,4 +77,37 @@
     </table>
   </div>
 </section>
+
+<script src="{{ url_for('static', filename='storage_picker.js') }}"></script>
+<script>
+(function () {
+  var driverSel = document.querySelector('select[name="driverType"]');
+  var localRow = document.getElementById('local-root-row');
+  var rootInput = document.getElementById('local-root-path');
+  var configJson = document.getElementById('config-json');
+
+  function syncDriver() {
+    if (!driverSel || !localRow) return;
+    var isLocal = driverSel.value === 'local';
+    localRow.hidden = !isLocal;
+  }
+  if (driverSel) {
+    driverSel.addEventListener('change', syncDriver);
+    syncDriver();
+  }
+
+  // 提交前：若选择 local 且用户通过浏览器选了 root_path，则写入配置 JSON。
+  var form = document.querySelector('form[action="{{ url_for('settings.storage_add') }}"]');
+  if (form) {
+    form.addEventListener('submit', function () {
+      if (driverSel && driverSel.value === 'local' && rootInput && rootInput.value.trim()) {
+        var cfg = {};
+        try { cfg = JSON.parse(configJson.value || '{}'); } catch (e) { cfg = {}; }
+        cfg.root_path = rootInput.value.trim();
+        configJson.value = JSON.stringify(cfg, null, 2);
+      }
+    });
+  }
+})();
+</script>
 {% endblock %}

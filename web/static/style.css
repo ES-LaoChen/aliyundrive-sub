@@ -692,6 +692,36 @@ details.subconfig > summary:focus-visible { outline: 2px solid var(--primary); o
 .fp-folder-id { display: none; }
 
 /* =============================================================
+   统一目录选择器（存储管理 / 同步管理）：storage_picker.js
+   复用模态框与面包屑样式；以下为触发器与列表专属类。
+   ============================================================= */
+.sp-trigger {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 10px 12px; border: 1px dashed var(--primary-150);
+  border-radius: var(--radius-xs); background: var(--primary-50); font-size: 13px;
+}
+.sp-target-input {
+  flex: 1; min-width: 240px;
+  padding: 8px 12px; border: 1px solid var(--border);
+  border-radius: var(--radius-xs); background: #fff;
+  color: var(--ink); font-size: 13px;
+}
+.sp-target-input:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-100); }
+.sp-search {
+  flex: 1; min-width: 200px;
+  padding: 8px 12px; border: 1px solid var(--border);
+  border-radius: var(--radius-xs); background: #fff; font-size: 13px;
+}
+.sp-search:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-100); }
+.fp-list { list-style: none; margin: 0; padding: 0; }
+.fp-item {
+  padding: 11px 12px; border: 1px solid var(--border); border-radius: var(--radius-xs);
+  margin-bottom: 8px; cursor: pointer; background: #fff; font-size: 13.5px;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.fp-item:hover { border-color: var(--primary-150); background: var(--primary-50); }
+
+/* =============================================================
    提示条
    ============================================================= */
 .flashes { list-style: none; margin: 0 0 18px; padding: 0; display: flex; flex-direction: column; gap: 10px; }

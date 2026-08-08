@@ -54,6 +54,7 @@ def create_app(services: Services) -> Flask:
     from web.blueprints.subscription_detail_bp import bp as sub_detail_bp
     from web.blueprints.tg_monitor_bp import bp as tg_monitor_bp
     from web.blueprints.sync_bp import bp as sync_bp
+    from web.blueprints.storage_picker_bp import bp as storage_picker_bp
 
     app.register_blueprint(sub_bp)
     app.register_blueprint(settings_bp)
@@ -62,6 +63,7 @@ def create_app(services: Services) -> Flask:
     app.register_blueprint(sub_detail_bp)
     app.register_blueprint(tg_monitor_bp)
     app.register_blueprint(sync_bp)
+    app.register_blueprint(storage_picker_bp)
 
     @app.route("/")
     def index():

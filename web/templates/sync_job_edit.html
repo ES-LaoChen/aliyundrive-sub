@@ -19,12 +19,19 @@
 
       <section class="surface">
         <div class="section-head"><h2>路径</h2><span class="cell-sub">虚拟路径格式 /挂载名/相对路径</span></div>
-        <label>源路径<span class="required-mark">*</span><input name="srcPath" value="{{ form.srcPath or '' }}" required placeholder="/local/Downloads"></label>
-        <label>目标路径<span class="required-mark">*</span><input name="dstPath" value="{{ form.dstPath or '' }}" required placeholder="/media/Movies 或多目标用 : 分隔"></label>
+        <label>源路径<span class="required-mark">*</span><input name="srcPath" id="srcPath" value="{{ form.srcPath or '' }}" required placeholder="/local/Downloads"></label>
+        {% from "partials/storage_picker.html" import storage_picker %}
+        {{ storage_picker(field_prefix="src", target_input_id="srcPath",
+                          backend="storage", open_btn_id="src-open", title="选择源目录") }}
+        <label>目标路径<span class="required-mark">*</span><input name="dstPath" id="dstPath" value="{{ form.dstPath or '' }}" required placeholder="/media/Movies 或多目标用 : 分隔"></label>
+        {% from "partials/storage_picker.html" import storage_picker %}
+        {{ storage_picker(field_prefix="dst", target_input_id="dstPath",
+                          backend="storage", open_btn_id="dst-open", title="选择目标目录") }}
         <p class="hint">
           可用存储目录（挂载）：
           {% for m in mounts %}<code>{{ m.name }}</code>{% if not loop.last %} {% endif %}{% endfor %}
           {% if not mounts %}暂未配置（请到「系统设置 → 存储目录」添加）{% endif %}
+          <br>点击「浏览目录」可逐级进入挂载内部选取，避免手动输入路径格式错误。
         </p>
       </section>
 
@@ -95,6 +102,7 @@
   </form>
 </section>
 
+<script src="{{ url_for('static', filename='storage_picker.js') }}"></script>
 <script>
 (function () {
   const sel = document.getElementById('isCron');
