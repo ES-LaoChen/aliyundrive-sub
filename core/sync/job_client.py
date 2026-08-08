@@ -756,6 +756,48 @@ class JobTask:
         self.job_client.persist_task_status(
             self.task_id, status, self.current_tasks, int(self.create_time)
         )
+        # 归档一条同步记录（同步操作历史日志）。
+        self._write_sync_record(status)
+
+    def _write_sync_record(self, status: int) -> None:
+        """把本次运行结果写入 sync_records 历史表，供审计 / 导出 / 过滤查询。"""
+        try:
+            from core.sync.job_dao import add_sync_record
+
+            # 成功同步（移动）的文件数与数据量：finish 中 status==2 的明细。
+            success_items = [it for it in self.finish if it.get("status") == 2]
+            data_count = len(success_items)
+            data_size = sum(int(it.get("fileSize") or 0) for it in success_items)
+
+            # 错误信息：汇总失败/异常明细的 errMsg（最多取前若干条）。
+            err_items = [
+                it for it in self.finish
+                if it.get("status") not in (2, None) and it.get("errMsg")
+            ]
+            err_msg = ""
+            if err_items:
+                err_msg = "；".join(
+                    f"{it.get('fileName', '')}: {it.get('errMsg', '')}"
+                    for it in err_items[:5]
+                )
+            if self.break_flag and not err_msg:
+                err_msg = "任务被中止/中断"
+
+            record = {
+                "jobId": self.job.id,
+                "jobName": getattr(self.job, "remark", "") or "",
+                "operator": self.job_client.operator or "自动调度",
+                "status": int(status),
+                "dataCount": data_count,
+                "dataSize": data_size,
+                "errMsg": err_msg[:2000],
+                "startTime": int(self.create_time),
+                "endTime": int(time.time()),
+                "createTime": int(time.time()),
+            }
+            add_sync_record(self.job_client.session, record)
+        except Exception:
+            logger.exception("写入同步记录失败（不影响主流程）")
 
     def finish_run(self):
         self.job_client.finish_run(self)
@@ -772,6 +814,8 @@ class JobClient:
         self.run_lock = threading.Lock()
         self.current_job_task = None
         self.notify_hook = None
+        # operator：本次运行的操作人员 / 触发来源（手动 / 自动调度 / system）。
+        self.operator = "自动调度"
         try:
             self.do_by_time()
         except Exception as e:
@@ -818,9 +862,11 @@ class JobClient:
             except Exception:
                 logger.exception("同步任务结束通知失败")
 
-    def do_job(self, lock_acquired=False):
+    def do_job(self, lock_acquired=False, operator=None):
         if not lock_acquired and not self.run_lock.acquire(blocking=False):
             return
+        if operator:
+            self.operator = operator
         self.job_doing = True
         task_id = None
         try:
@@ -841,12 +887,13 @@ class JobClient:
                 update_job_task_status(self.session, task_id, 6, err_msg)
             logger.exception(e)
 
-    def do_manual(self):
+    def do_manual(self, operator="手动"):
         if not self.run_lock.acquire(blocking=False):
             raise Exception(G.job_running)
+        self.operator = operator or "手动"
         self.job_doing = True
         do_job_thread = threading.Thread(
-            target=self.do_job, kwargs={"lock_acquired": True},
+            target=self.do_job, kwargs={"lock_acquired": True, "operator": self.operator},
             name="job-manual-" + str(self.job_id), daemon=True
         )
         do_job_thread.start()

@@ -55,6 +55,7 @@ def create_app(services: Services) -> Flask:
     from web.blueprints.tg_monitor_bp import bp as tg_monitor_bp
     from web.blueprints.sync_bp import bp as sync_bp
     from web.blueprints.storage_picker_bp import bp as storage_picker_bp
+    from web.blueprints.sync_records_bp import bp as sync_records_bp
 
     app.register_blueprint(sub_bp)
     app.register_blueprint(settings_bp)
@@ -64,6 +65,7 @@ def create_app(services: Services) -> Flask:
     app.register_blueprint(tg_monitor_bp)
     app.register_blueprint(sync_bp)
     app.register_blueprint(storage_picker_bp)
+    app.register_blueprint(sync_records_bp)
 
     @app.route("/")
     def index():
@@ -111,6 +113,20 @@ def create_app(services: Services) -> Flask:
     @app.context_processor
     def _inject() -> dict:
         return {"app_name": "阿里云盘订阅转存"}
+
+    @app.template_filter("filesize")
+    def _filesize_filter(value) -> str:
+        try:
+            n = int(value or 0)
+        except (TypeError, ValueError):
+            return str(value)
+        if n < 1024:
+            return f"{n} B"
+        if n < 1024 * 1024:
+            return f"{n / 1024:.1f} KB"
+        if n < 1024 * 1024 * 1024:
+            return f"{n / 1024 / 1024:.1f} MB"
+        return f"{n / 1024 / 1024 / 1024:.2f} GB"
 
     logger.info("Web 应用已创建，蓝图已注册")
     return app

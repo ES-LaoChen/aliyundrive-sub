@@ -45,9 +45,9 @@ class SyncService:
             session.commit()
 
     # ---- 手动触发 / 启停 ----
-    def do_job_manual(self, job_id: int):
+    def do_job_manual(self, job_id: int, operator="手动"):
         with self.session_factory() as session:
-            job_service.do_job_manual(job_id, session, services=self.services)
+            job_service.do_job_manual(job_id, session, services=self.services, operator=operator)
             session.commit()
 
     def abort_job(self, job_id: int):
@@ -88,6 +88,24 @@ class SyncService:
     def get_job_current(self, job_id: int, status=None):
         with self.session_factory() as session:
             return job_service.get_job_current(job_id, session, status, self.services)
+
+    # ---- 同步记录（历史日志）编排 ----
+    def add_sync_record(self, record: dict) -> int:
+        with self.session_factory() as session:
+            from core.sync.job_dao import add_sync_record as _add
+            rid = _add(session, record)
+            session.commit()
+            return rid
+
+    def get_sync_record_list(self, params: dict) -> dict:
+        with self.session_factory() as session:
+            from core.sync.job_dao import get_sync_record_list as _list
+            return _list(session, params)
+
+    def get_all_sync_records(self, params: dict = None) -> list:
+        with self.session_factory() as session:
+            from core.sync.job_dao import get_all_sync_records as _all
+            return _all(session, params)
 
     # ---- 存储目录（挂载）编排：委托 storage_engine ----
     def get_system_engine_id(self):

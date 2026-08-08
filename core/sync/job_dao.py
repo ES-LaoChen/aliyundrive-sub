@@ -11,6 +11,7 @@ from models_sync import (
     SOURCE_SNAPSHOT_FIELDS,
     SyncJob,
     SyncMoveLog,
+    SyncRecord,
     SyncSourceSnapshot,
     SyncSourceSnapshotMeta,
     SyncTask,
@@ -348,3 +349,96 @@ def append_moved_file(db, job_id: int, file_name: str, src_path=None) -> None:
         srcPath=src_path or "",
         createTime=int(time.time()),
     ))
+
+
+# ---------- 同步记录（sync_record） ----------
+
+def add_sync_record(db, record: dict) -> int:
+    """写入一条同步操作历史记录，返回自增 id。"""
+    row = SyncRecord(**{k: v for k, v in record.items() if k != "id"})
+    db.add(row)
+    db.flush()
+    return row.id
+
+
+def get_sync_record_list(db, params: dict) -> dict:
+    """分页 + 过滤查询同步记录。
+
+    过滤参数（均在 params 中，按需提供）：
+      - jobId:       按作业 id 过滤
+      - status:      按状态过滤（整数）
+      - operator:    按操作人员/触发来源模糊匹配
+      - startTimeFrom / startTimeTo: 按 startTime（Unix 秒）范围过滤
+      - pageNum / pageSize: 分页，默认 1 / 20
+    返回 {dataList, total, pageNum, pageSize}。
+    """
+    query = db.query(SyncRecord)
+    if params.get("jobId"):
+        try:
+            query = query.filter_by(jobId=int(params["jobId"]))
+        except (TypeError, ValueError):
+            pass
+    if params.get("status") not in (None, ""):
+        try:
+            query = query.filter_by(status=int(params["status"]))
+        except (TypeError, ValueError):
+            pass
+    operator = (params.get("operator") or "").strip()
+    if operator:
+        query = query.filter(SyncRecord.operator.like(f"%{operator}%"))
+    try:
+        sf = int(params.get("startTimeFrom") or 0)
+    except (TypeError, ValueError):
+        sf = 0
+    if sf > 0:
+        query = query.filter(SyncRecord.startTime >= sf)
+    try:
+        st = int(params.get("startTimeTo") or 0)
+    except (TypeError, ValueError):
+        st = 0
+    if st > 0:
+        query = query.filter(SyncRecord.startTime <= st)
+
+    page = int(params.get("pageNum", 1) or 1)
+    size = int(params.get("pageSize", 20) or 20)
+    total = query.count()
+    rows = (
+        query.order_by(SyncRecord.startTime.desc(), SyncRecord.id.desc())
+        .limit(size)
+        .offset((page - 1) * size)
+        .all()
+    )
+    return {"dataList": rows, "total": total, "pageNum": page, "pageSize": size}
+
+
+def get_all_sync_records(db, params: dict = None) -> list:
+    """导出用：返回符合条件的全部记录（不分页），按时间倒序。"""
+    params = params or {}
+    query = db.query(SyncRecord)
+    if params.get("jobId"):
+        try:
+            query = query.filter_by(jobId=int(params["jobId"]))
+        except (TypeError, ValueError):
+            pass
+    if params.get("status") not in (None, ""):
+        try:
+            query = query.filter_by(status=int(params["status"]))
+        except (TypeError, ValueError):
+            pass
+    operator = (params.get("operator") or "").strip()
+    if operator:
+        query = query.filter(SyncRecord.operator.like(f"%{operator}%"))
+    try:
+        sf = int(params.get("startTimeFrom") or 0)
+    except (TypeError, ValueError):
+        sf = 0
+    if sf > 0:
+        query = query.filter(SyncRecord.startTime >= sf)
+    try:
+        st = int(params.get("startTimeTo") or 0)
+    except (TypeError, ValueError):
+        st = 0
+    if st > 0:
+        query = query.filter(SyncRecord.startTime <= st)
+    return query.order_by(SyncRecord.startTime.desc(), SyncRecord.id.desc()).all()
+

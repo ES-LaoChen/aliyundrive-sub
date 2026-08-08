@@ -39,6 +39,10 @@
           <span class="nav-icon"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 14H9V8h2v8zm4 0h-2V8h2v8z"/></svg></span>
           <span class="nav-label">同步管理</span>
         </a>
+        <a class="nav-item" href="{{ url_for('sync_records.index') }}" data-match-prefixes="/sync/records">
+          <span class="nav-icon"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M4 4h16v2H4zm0 5h16v2H4zm0 5h16v2H4zm0 5h10v2H4z"/></svg></span>
+          <span class="nav-label">同步记录</span>
+        </a>
         <a class="nav-item" href="{{ url_for('tg_monitor.index') }}" data-match-prefixes="/tg-monitor">
           <span class="nav-icon"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg></span>
           <span class="nav-label">TG 频道监控</span>

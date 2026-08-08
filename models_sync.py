@@ -321,6 +321,40 @@ class SyncMoveLog(Base):
     )
 
 
+# ============================================================
+# 同步记录（sync_record）：每次同步操作的归档历史日志。
+# 用于审计 / 存档 / 分析：同步时间、状态、数据量、错误信息、操作人员。
+# ============================================================
+class SyncRecord(Base):
+    """同步操作历史记录：每次作业执行（手动 / 自动调度）归档一条。"""
+
+    __tablename__ = "sync_records"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # 关联作业（执行删除作业时记录保留，不强制外键级联）。
+    jobId: Mapped[int] = mapped_column(Integer, index=True, default=0)
+    # 作业名称快照（作业被改名/删除后仍可读）。
+    jobName: Mapped[str] = mapped_column(String(255), default="")
+    # operator：操作人员 / 触发来源，如 "手动" / "自动调度" / "system"。
+    operator: Mapped[str] = mapped_column(String(64), default="")
+    # status：2-成功 3-部分失败 4-中止 6-失败 7-其他（与 sync_tasks.status 对齐）。
+    status: Mapped[int] = mapped_column(Integer, default=0)
+    # dataCount：本次成功同步（移动）的文件数。
+    dataCount: Mapped[int] = mapped_column(Integer, default=0)
+    # dataSize：本次成功同步（移动）的数据量字节数。
+    dataSize: Mapped[int] = mapped_column(Integer, default=0)
+    errMsg: Mapped[str] = mapped_column(Text, default="")
+    # 起止时间（Unix 秒）；startTime 即本次运行开始，endTime 即完成。
+    startTime: Mapped[int] = mapped_column(Integer, default=0)
+    endTime: Mapped[int] = mapped_column(Integer, default=0)
+    createTime: Mapped[int] = mapped_column(Integer, default=0)
+
+    __table_args__ = (
+        Index("ix_sync_record_job", "jobId"),
+        Index("ix_sync_record_time", "createTime"),
+    )
+
+
 def sync_source_snapshot_identity(job) -> dict:
     """从 job 提取源快照身份（与 TaoSync jobMapper.sourceSnapshotIdentity 一致）。"""
     fields = (

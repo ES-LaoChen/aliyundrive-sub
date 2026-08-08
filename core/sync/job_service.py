@@ -264,11 +264,11 @@ def continue_all_job(session):
         continue_job(session, job.id)
 
 
-def do_job_manual(job_id: int, session, services=None):
+def do_job_manual(job_id: int, session, services=None, operator="手动"):
     client = get_job_client_by_id(session, int(job_id), services)
     if client.job.enable != 1:
         raise ValueError("已禁用的作业不能运行")
-    client.do_manual()
+    client.do_manual(operator=operator)
 
 
 def remove_job_client(job_id: int, session):
