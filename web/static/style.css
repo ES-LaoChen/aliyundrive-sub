@@ -735,6 +735,12 @@ details.subconfig > summary:focus-visible { outline: 2px solid var(--primary); o
 .flash.warning { background: var(--warn-50); color: var(--warn); border-color: rgba(245, 158, 11, 0.28); }
 .flash.error { background: var(--bad-50); color: var(--bad); border-color: rgba(220, 38, 38, 0.25); }
 
+/* 表单内联提交状态（新增存储目录 AJAX 反馈） */
+.form-status { font-size: 13px; font-weight: 500; min-height: 18px; margin: 10px 0 0; }
+.form-status.info { color: var(--info); }
+.form-status.success { color: var(--ok); }
+.form-status.error { color: var(--bad); }
+
 .mt-8 { margin-top: 8px; }
 .mt-16 { margin-top: 16px; }
 

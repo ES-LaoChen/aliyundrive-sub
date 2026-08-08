@@ -95,19 +95,24 @@ class SyncService:
         from core.sync import engine as storage_engine
 
         with self.session_factory() as session:
-            return storage_engine.add_mount(session, data)
+            result = storage_engine.add_mount(session, data)
+            session.commit()
+            return result
 
     def update_mount(self, mount_id: int, data: dict):
         from core.sync import engine as storage_engine
 
         with self.session_factory() as session:
-            return storage_engine.update_mount(session, mount_id, data)
+            result = storage_engine.update_mount(session, mount_id, data)
+            session.commit()
+            return result
 
     def remove_mount(self, mount_id: int):
         from core.sync import engine as storage_engine
 
         with self.session_factory() as session:
             storage_engine.remove_mount(session, mount_id)
+            session.commit()
 
     def get_supported_drivers(self):
         from core.sync import engine as storage_engine

@@ -38,13 +38,14 @@
 
     <label class="inline"><input type="checkbox" name="enabled" value="1" checked>启用此存储目录</label>
     <div class="form-actions">
-      <button type="submit" class="btn primary">添加</button>
+      <button type="submit" class="btn primary" id="storage-add-btn">添加</button>
       <a class="btn ghost" href="{{ url_for('settings.index') }}">返回设置</a>
     </div>
+    <p class="form-status" id="storage-add-status" role="status" aria-live="polite"></p>
   </form>
 </section>
 
-<section class="surface">
+<section class="surface" id="mounts-section">
   <div class="section-head"><h2>已有存储目录</h2><span class="cell-sub">共 {{ mounts|length }} 个</span></div>
   <div class="table-wrap">
     <table class="grid">
@@ -98,14 +99,66 @@
 
   // 提交前：若选择 local 且用户通过浏览器选了 root_path，则写入配置 JSON。
   var form = document.querySelector('form[action="{{ url_for('settings.storage_add') }}"]');
+  var statusEl = document.getElementById('storage-add-status');
+  var submitBtn = document.getElementById('storage-add-btn');
+
+  function setStatus(kind, msg) {
+    if (!statusEl) return;
+    statusEl.className = 'form-status ' + (kind || '');
+    statusEl.textContent = msg || '';
+  }
+
   if (form) {
-    form.addEventListener('submit', function () {
+    form.addEventListener('submit', function (e) {
+      e.preventDefault();
+
+      // 提交前：若选择 local 且用户通过浏览器选了 root_path，则写入配置 JSON。
       if (driverSel && driverSel.value === 'local' && rootInput && rootInput.value.trim()) {
         var cfg = {};
-        try { cfg = JSON.parse(configJson.value || '{}'); } catch (e) { cfg = {}; }
+        try { cfg = JSON.parse(configJson.value || '{}'); } catch (err) { cfg = {}; }
         cfg.root_path = rootInput.value.trim();
         configJson.value = JSON.stringify(cfg, null, 2);
       }
+
+      // 状态管理：进入「提交中」
+      var fd = new FormData(form);
+      if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = '添加中…'; }
+      setStatus('info', '正在提交，请稍候…');
+
+      fetch(form.getAttribute('action'), {
+        method: 'POST',
+        body: fd,
+        headers: { 'X-Requested-With': 'XMLHttpRequest' }
+      }).then(function (resp) {
+        // 后端无论成功/失败都会 302 重定向到 GET /settings/storage。
+        // fetch 自动跟随重定向，最终拿到渲染后的页面 HTML。
+        return resp.text().then(function (html) {
+          var doc = new DOMParser().parseFromString(html, 'text/html');
+          var errFlash = doc.querySelector('.flash.error, .flashes .error');
+          var okFlash = doc.querySelector('.flash.success, .flashes .success');
+          var newSection = doc.getElementById('mounts-section');
+
+          if (errFlash) {
+            // 请求失败（校验/后端异常）：给出明确错误提示，保持列表与表单不变。
+            setStatus('error', errFlash.textContent.trim());
+            return;
+          }
+          // 成功：用响应中的最新列表就地刷新，并清空表单。
+          if (newSection && document.getElementById('mounts-section')) {
+            document.getElementById('mounts-section').replaceWith(newSection);
+          }
+          form.reset();
+          if (driverSel) syncDriver();
+          if (rootInput) rootInput.value = '';
+          var okMsg = okFlash ? okFlash.textContent.trim() : '存储目录已添加';
+          setStatus('success', okMsg);
+        });
+      }).catch(function (err) {
+        // 网络/请求层失败：明确提示，列表状态保持不变。
+        setStatus('error', '提交失败，请检查网络后重试：' + (err && err.message ? err.message : err));
+      }).finally(function () {
+        if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = '添加'; }
+      });
     });
   }
 })();
