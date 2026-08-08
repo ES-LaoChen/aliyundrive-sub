@@ -1,8 +1,8 @@
-"""设置蓝图：云盘凭证状态 / 凭证输入 / TMDB / Telegram 通知 / 订阅状态巡检。
+"""设置蓝图：云盘凭证状态 / 凭证输入 / Telegram 通知 / 订阅状态巡检。
 
 凭证区既展示状态（db_saved / drive_id），也支持前端手动
 输入 refresh_token（POST /settings/token），保存到 DB 并尝试验证有效性。
-TMDB/Telegram 通知/订阅状态巡检可在此保存：写入 Setting KV 表（持久化）
+Telegram 通知/订阅状态巡检可在此保存：写入 Setting KV 表（持久化）
 并实时更新运行时对象。
 """
 from __future__ import annotations
@@ -20,7 +20,6 @@ from flask import (
     url_for,
 )
 
-from core.tmdb import TMDBClient
 from models import Setting
 from schemas import SettingsForm
 from web.services import Services
@@ -48,12 +47,11 @@ def _set_kv(db, key: str, value: str) -> None:
     db.commit()
 
 
-@bp.route("", methods=["GET"])
+@bp.route("", methods=["GET"], strict_slashes=False)
 def index():
     svc = _services()
     with svc.session_factory() as db:
         cfg = {
-            "tmdb_api_key": _get_kv(db, "tmdb_api_key", ""),
             # SubStatus 巡检配置（未配置回退默认值）。
             "link_fail_threshold": _get_kv(db, "link_fail_threshold", "3"),
             "sub_check_interval": _get_kv(db, "sub_check_interval", "3600"),
@@ -78,7 +76,6 @@ def index():
 def save():
     svc = _services()
     form = SettingsForm(
-        tmdb_api_key=request.form.get("tmdb_api_key", ""),
         # SubStatus 巡检配置（checkbox 未勾选时表单不含该字段，回退默认 "false"）。
         link_fail_threshold=request.form.get("link_fail_threshold", "3"),
         sub_check_interval=request.form.get("sub_check_interval", "3600"),
@@ -92,12 +89,6 @@ def save():
     )
     try:
         with svc.session_factory() as db:
-            # 关键修复：浏览器不会回显 password 字段的已保存值，导致用户在其他配置保存时
-            # 未重新输入 API Key，表单提交为空字符串，从而把已存的 Key 覆盖成空（表现为
-            # 「Key 无法保存 / 保存后消失」）。因此仅当用户实际填写了 Key 才覆盖，
-            # 否则保留 KV 中既有值。
-            if form.tmdb_api_key:
-                _set_kv(db, "tmdb_api_key", form.tmdb_api_key)
             # SubStatus：写入 5 个巡检 KV（运行参数每轮读 DB 热更新）。
             _set_kv(db, "link_fail_threshold", form.link_fail_threshold)
             _set_kv(db, "sub_check_interval", form.sub_check_interval)
@@ -107,7 +98,7 @@ def save():
             # Telegram 频道监控通知（可选）KV 落库。
             _set_kv(db, "tg_notify_enabled", form.tg_notify_enabled)
             _set_kv(db, "tg_notify_chat_id", form.tg_notify_chat_id)
-            # 同 TMDB API Key 的处理：浏览器不回显密码框，仅当用户实际填写了 Token 才覆盖，
+            # 浏览器不回显密码框，仅当用户实际填写了 Token 才覆盖，
             # 否则保留 KV 中既有值（避免保存其它设置时把已存的 Token 清空）。
             if form.tg_bot_token:
                 _set_kv(db, "tg_bot_token", form.tg_bot_token)
@@ -163,37 +154,79 @@ def save_token():
     return redirect(url_for("settings.index"))
 
 
-@bp.route("/test-tmdb", methods=["POST"], endpoint="test_tmdb")
-def test_tmdb():
-    """测试 TMDB API Key 连通性：先保存配置（如请求携带 key）再验证 Key 有效性。
-
-    读取优先级：JSON body 的 ``api_key`` → 表单 ``api_key`` → Setting KV 表。
-    若请求体/表单携带**非空** ``api_key``，则先 ``_set_kv`` 持久化该 key，
-    再做连通性测试（即「保存并测试」语义，测试即使用刚保存的 key）；
-    否则仅做测试，沿用已保存的 KV key（兼容旧行为）。
-    始终返回 HTTP 200，由前端依据 ``ok`` 显示成功（绿）或失败（红）提示，
-    连接验证失败给出清晰错误信息。
-    """
+# ============================================================
+# 存储目录（挂载）管理：同步引擎的多后端存储配置入口。
+# ============================================================
+def _sync_service():
     svc = _services()
-    payload = request.get_json(silent=True) or {}
-    api_key = payload.get("api_key", "")
-    if not api_key:
-        api_key = request.form.get("api_key", "")
+    sync = getattr(svc, "sync_service", None)
+    if sync is None:
+        raise RuntimeError("同步服务未初始化")
+    return sync
 
-    if api_key:
-        # 请求携带非空 key → 先持久化（保存并测试），测试即使用该 key。
-        with svc.session_factory() as db:
-            _set_kv(db, "tmdb_api_key", api_key)
-    else:
-        # 未携带 key → 回退读取已保存的 KV key（兼容旧行为）。
-        with svc.session_factory() as db:
-            api_key = _get_kv(db, "tmdb_api_key", "")
 
-    if not api_key:
-        return jsonify(ok=False, message="请输入或先保存 TMDB API Key")
+@bp.route("/storage", methods=["GET"])
+def storage():
+    """存储目录管理：列出已有挂载 + 新增表单。"""
+    sync = _sync_service()
+    try:
+        mounts = sync.get_mount_list()
+        drivers = sync.get_supported_drivers()
+        engine_id = sync.get_system_engine_id()
+    except Exception:
+        logger.exception("读取存储目录失败")
+        mounts, drivers, engine_id = [], [], 0
+    return render_template(
+        "settings_storage.html",
+        mounts=mounts, drivers=drivers, engine_id=engine_id,
+    )
 
-    ok, message = TMDBClient(api_key=api_key).test_connection()
-    return jsonify(ok=ok, message=message)
+
+@bp.route("/storage", methods=["POST"])
+def storage_add():
+    """新增存储目录（挂载）。config 以 JSON 文本提交。"""
+    sync = _sync_service()
+    name = (request.form.get("name") or "").strip()
+    driver_type = (request.form.get("driverType") or "").strip().lower()
+    config_raw = (request.form.get("config") or "").strip()
+    enabled = 1 if request.form.get("enabled") == "1" else 0
+    if not name or not driver_type:
+        flash("请填写名称与驱动类型", "error")
+        return redirect(url_for("settings.storage"))
+    try:
+        import json as _json
+        config = _json.loads(config_raw) if config_raw else {}
+        if not isinstance(config, dict):
+            raise ValueError("config 必须是 JSON 对象")
+    except Exception as exc:
+        flash(f"config JSON 解析失败：{exc}", "error")
+        return redirect(url_for("settings.storage"))
+    try:
+        data = {
+            "engineId": sync.get_system_engine_id(),
+            "name": name,
+            "driverType": driver_type,
+            "config": config,
+            "enabled": enabled,
+        }
+        sync.add_mount(data)
+        flash(f"存储目录「{name}」已添加", "success")
+    except Exception as exc:
+        logger.exception("新增存储目录失败")
+        flash(f"添加失败：{exc}", "error")
+    return redirect(url_for("settings.storage"))
+
+
+@bp.route("/storage/<int:mount_id>/delete", methods=["POST"])
+def storage_delete(mount_id: int):
+    sync = _sync_service()
+    try:
+        sync.remove_mount(mount_id)
+        flash("存储目录已删除", "success")
+    except Exception as exc:
+        logger.exception("删除存储目录失败")
+        flash(f"删除失败：{exc}", "error")
+    return redirect(url_for("settings.storage"))
 
 
 

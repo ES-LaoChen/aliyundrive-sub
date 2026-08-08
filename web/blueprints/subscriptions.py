@@ -16,7 +16,6 @@ from flask import (
 )
 
 from core.naming import RENAME_MODES
-from core.tmdb import TMDBClient, TMDBError
 from models import Setting, Subscription
 from schemas import SubscriptionCreate
 from web.services import Services
@@ -60,57 +59,6 @@ def new():
     )
 
 
-@bp.route("/api/tmdb/<int:tmdb_id>", methods=["GET"], endpoint="tmdb_fetch")
-def tmdb_fetch(tmdb_id: int):
-    """按 TMDB ID 获取媒体详情（标题 / 海报 / 简介），供新增订阅回填。
-
-    从系统设置读取 TMDB API Key 进行调用；未配置或调用失败均给出清晰错误。
-    """
-    svc = _services()
-    with svc.session_factory() as db:
-        api_key = _get_kv(db, "tmdb_api_key", "")
-    if not api_key:
-        return jsonify(error="请先在「设置」页配置 TMDB API Key"), 400
-    try:
-        info = TMDBClient(api_key=api_key).get_details(tmdb_id)
-    except TMDBError as exc:
-        return jsonify(error=str(exc)), 502
-    return jsonify(info)
-
-
-@bp.route("/api/tmdb/search", methods=["GET"], endpoint="tmdb_search")
-def tmdb_search():
-    """按名称搜索 TMDB，返回匹配结果列表（含每个结果的数字 ID）。
-
-    支持 ``movie`` / ``tv`` / ``person`` / ``multi`` 类型，从系统设置读取
-    TMDB API Key 进行调用；未配置或调用失败均给出清晰错误。
-    """
-    svc = _services()
-    with svc.session_factory() as db:
-        api_key = _get_kv(db, "tmdb_api_key", "")
-    if not api_key:
-        return jsonify(error="请先在「设置」页配置 TMDB API Key"), 400
-
-    query = (request.args.get("q", "") or "").strip()
-    if not query:
-        return jsonify(error="请输入搜索关键词"), 400
-
-    # 仅允许合法类型，非法值兜底为 multi，避免发起无意义请求。
-    allowed_types = {"multi", "movie", "tv", "person"}
-    media_type = (request.args.get("type", "multi") or "multi").strip()
-    if media_type not in allowed_types:
-        media_type = "multi"
-
-    try:
-        results = TMDBClient(api_key=api_key).search(query, media_type)
-    except TMDBError as exc:
-        return jsonify(error=str(exc)), 502
-
-    if not results:
-        return jsonify(results=[], message=f"未找到与「{query}」匹配的 TMDB 结果")
-    return jsonify(results=results)
-
-
 @bp.route("", methods=["POST"])
 def create():
     svc = _services()
@@ -137,8 +85,6 @@ def create():
             rename_suffix=form.rename_suffix,
             status=form.status or "active",
             remark=form.remark,
-            tmdb_id=form.tmdb_id,
-            poster_url=form.poster_url,
         )
         db.add(sub)
         db.commit()
@@ -147,7 +93,14 @@ def create():
         status = sub.status
     if status == "active":
         svc.scheduler.register(sub)
-    flash(f"订阅「{form.name or sub_id}」已创建", "success")
+        # 新增即触发首次检查，便于即时验证配置并获取最新结果（无需等待调度周期）。
+        try:
+            svc.scheduler.trigger_once(sub_id)
+        except Exception:
+            logger.exception("新增订阅后自动触发检查失败（不影响创建）")
+        flash(f"订阅「{form.name or sub_id}」已创建，并立即执行首次检查", "success")
+    else:
+        flash(f"订阅「{form.name or sub_id}」已创建", "success")
     return redirect(url_for("subscriptions.index"))
 
 
@@ -192,8 +145,6 @@ def update(sub_id: int):
         sub.rename_suffix = form.rename_suffix
         sub.status = form.status or sub.status
         sub.remark = form.remark
-        sub.tmdb_id = form.tmdb_id
-        sub.poster_url = form.poster_url
         db.commit()
         new_status = sub.status
     # 同步调度任务。

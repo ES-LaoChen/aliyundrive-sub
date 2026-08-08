@@ -26,6 +26,11 @@ pydantic>=2.5
 pydantic-settings>=2.1
 python-dotenv>=1.0
 
+# 同步管理（移植自 TaoSync）
+pathspec>=0.12
+paramiko>=3.4
+smbprotocol>=1.13
+
 # 测试
 pytest>=7.4
 pytest-mock>=3.12

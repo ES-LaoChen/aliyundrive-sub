@@ -623,31 +623,11 @@ details.subconfig > summary:focus-visible { outline: 2px solid var(--primary); o
 .breadcrumb { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; font-size: 13px; padding: 8px 12px; background: #fff; border: 1px solid var(--border); border-radius: var(--radius-xs); }
 
 /* =============================================================
-   订阅编辑：分组 & TMDB
+   订阅编辑：分组
    ============================================================= */
 .card-group { display: flex; flex-direction: column; gap: 18px; }
 .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .subsection { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 16px; background: #fcfcff; }
-
-.tmdb-block { background: #fcfcff; }
-.tmdb-search-row { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
-.tmdb-search-row input { flex: 1; min-width: 200px; }
-.tmdb-results { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 8px; }
-.tmdb-result {
-  display: flex; align-items: center; gap: 12px;
-  padding: 10px; border: 1px solid var(--border); border-radius: var(--radius-xs);
-  background: #fff; cursor: pointer; transition: border-color 0.15s ease, background 0.15s ease;
-}
-.tmdb-result:hover { border-color: var(--primary-150); background: var(--primary-50); }
-.tmdb-result.selected { border-color: var(--primary); background: var(--primary-50); }
-.tmdb-result-main { display: flex; flex-direction: column; min-width: 0; }
-.tmdb-result-type { font-size: 11px; color: var(--secondary); font-weight: 600; }
-.tmdb-result-id { font-size: 11px; color: var(--muted); }
-.tmdb-result-poster { width: 40px; height: 56px; object-fit: cover; border-radius: 5px; flex: none; }
-.tmdb-poster-wrap { margin-top: 12px; }
-.tmdb-poster-wrap img { border-radius: var(--radius-xs); box-shadow: var(--shadow-sm); }
-.tmdb-id-row { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; margin-top: 12px; }
-.tmdb-id-row label { margin-bottom: 0; }
 
 /* =============================================================
    文件夹选择器（模态框）
@@ -738,7 +718,14 @@ details.surface > summary {
   border-bottom: 1px solid var(--border);
   list-style: none;
 }
-details.surface > summary::-webkit-details-marker { display: none; }
+/* 始终展开区块（如设置页「通知」「订阅状态巡检」）：保留与 summary 一致的标题样式，
+   但无折叠箭头、不可收缩。 */
+.surface > .section-head {
+  padding: 18px 0 14px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+}
+.surface > .section-head h2 { margin: 0; }
 details.surface > summary::after {
   content: "";
   float: right;

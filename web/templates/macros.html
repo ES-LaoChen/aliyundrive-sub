@@ -12,12 +12,12 @@
   text: 可选覆盖显示文本（不传则用默认中文映射或原始 status）。
 #}
 {% macro badge(kind, status, text=None) %}
-  {%- set sub_map = {'active': 'ok', 'completed': 'off'} -%}
+  {%- set sub_map = {'active': 'ok', 'pending_update': 'warn', 'completed': 'off'} -%}
   {%- set transfer_map = {'success': 'ok', 'failed': 'bad'} -%}
   {%- set run_map = {'success': 'ok', 'partial': 'warn', 'failed': 'bad', 'skipped_locked': 'off'} -%}
   {%- set bool_map = {'true': 'ok', 'false': 'off', '1': 'ok', '0': 'off'} -%}
   {%- set poll_map = {'none': 'warn'} -%}
-  {%- set sub_text_map = {'active': '进行中', 'completed': '已完结'} -%}
+  {%- set sub_text_map = {'active': '进行中', 'pending_update': '待更新', 'completed': '已完结'} -%}
   {%- set transfer_text_map = {'success': '成功', 'failed': '失败'} -%}
   {%- set _class = '' -%}
   {%- set display = text or status -%}

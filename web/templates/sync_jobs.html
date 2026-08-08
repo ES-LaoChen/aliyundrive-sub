@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% from "macros.html" import page_head, badge, empty %}
+{% block title %}同步作业 · {{ app_name }}{% endblock %}
+{% block content %}
+{{ page_head('同步管理', '在多后端存储之间移动文件',
+  actions='<a class="btn primary" href="' + url_for('sync.new') + '"><svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6z"/></svg>新增作业</a>') }}
+
+{% set enabled_count = jobs|selectattr('enable','equalto',1)|list|length %}
+
+<div class="stats-bar">
+  <div class="stat-card">
+    <div class="stat-icon purple"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 14H9V8h2v8zm4 0h-2V8h2v8z"/></svg></div>
+    <div class="stat-body"><div class="stat-num">{{ jobs|length }}</div><div class="stat-label">作业总数</div></div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-icon green"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg></div>
+    <div class="stat-body"><div class="stat-num">{{ enabled_count }}</div><div class="stat-label">已启用</div></div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-icon amber"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2zM11 16h2v-5h-2z"/></svg></div>
+    <div class="stat-body"><div class="stat-num">{{ jobs|length - enabled_count }}</div><div class="stat-label">已禁用</div></div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-icon blue"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M4 6h16v2H4zM4 11h16v2H4zM4 16h10v2H4z"/></svg></div>
+    <div class="stat-body"><div class="stat-num">{{ mounts|length }}</div><div class="stat-label">存储目录</div></div>
+  </div>
+</div>
+
+<div class="filter-bar">
+  <form class="inline-form" method="get" action="{{ url_for('sync.index') }}">
+    <label>调度类型
+      <select name="sched">
+        <option value="all" {{ 'selected' if sched_filter == 'all' }}>全部</option>
+        <option value="0" {{ 'selected' if sched_filter == '0' }}>间隔</option>
+        <option value="1" {{ 'selected' if sched_filter == '1' }}>Cron</option>
+        <option value="2" {{ 'selected' if sched_filter == '2' }}>手动</option>
+      </select>
+    </label>
+    <button class="btn primary" type="submit">筛选</button>
+    {% if sched_filter != 'all' %}<a class="btn ghost" href="{{ url_for('sync.index') }}">清空</a>{% endif %}
+    <a class="btn ghost" href="{{ url_for('settings.index') }}#storage">管理存储目录</a>
+  </form>
+</div>
+
+<section class="surface">
+  <div class="section-head"><h2>同步作业</h2><span class="cell-sub">共 {{ jobs|length }} 条</span></div>
+  <div class="table-wrap">
+    <table class="grid">
+      <thead>
+        <tr>
+          <th>作业名</th>
+          <th>源路径</th>
+          <th>目标路径</th>
+          <th>调度</th>
+          <th>状态</th>
+          <th style="text-align:right">操作</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for j in jobs %}
+        <tr>
+          <td class="cell-main">{{ j.remark or ('作业 #' + j.id|string) }}</td>
+          <td class="cell-sub">{{ j.srcPath }}</td>
+          <td class="cell-sub">{{ j.dstPath }}</td>
+          <td class="cell-sub">
+            {% if j.isCron == 0 %}间隔 {{ j.interval }}s
+            {% elif j.isCron == 1 %}Cron
+            {% else %}手动{% endif %}
+          </td>
+          <td>{{ badge('bool', '1' if j.enable else '0', text=('启用' if j.enable else '禁用')) }}</td>
+          <td>
+            <div class="row-actions">
+              <form method="post" action="{{ url_for('sync.run', job_id=j.id) }}">
+                <button class="mini" type="submit">运行</button>
+              </form>
+              {% if j.enable %}
+              <form method="post" action="{{ url_for('sync.pause', job_id=j.id) }}">
+                <button class="mini" type="submit">禁用</button>
+              </form>
+              {% else %}
+              <form method="post" action="{{ url_for('sync.resume', job_id=j.id) }}">
+                <button class="mini" type="submit">启用</button>
+              </form>
+              {% endif %}
+              <form method="post" action="{{ url_for('sync.abort', job_id=j.id) }}">
+                <button class="mini" type="submit">中止</button>
+              </form>
+              <a class="mini" href="{{ url_for('sync.edit', job_id=j.id) }}">编辑</a>
+              <form method="post" action="{{ url_for('sync.delete', job_id=j.id) }}" onsubmit="return confirm('确认删除该作业？');">
+                <button class="mini danger" type="submit">删除</button>
+              </form>
+            </div>
+          </td>
+        </tr>
+      {% else %}
+        <tr><td colspan="6">{{ empty('还没有任何同步作业，点击右上角「新增作业」开始。') }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

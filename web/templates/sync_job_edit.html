@@ -1,0 +1,115 @@
+{% extends "base.html" %}
+{% from "macros.html" import page_head %}
+{% block title %}同步作业编辑 · {{ app_name }}{% endblock %}
+{% block content %}
+{{ page_head('同步管理', '编辑作业' if job else '新增作业', '配置源与目标路径，移动模式将把源文件移动到目标后删除源') }}
+
+{% set is_edit = job is not none %}
+
+<section class="form">
+  <form method="post"
+        action="{{ url_for('sync.update', job_id=job.id) if is_edit else url_for('sync.create') }}">
+    <div class="card-group">
+
+      <section class="surface">
+        <div class="section-head"><h2>基本信息</h2><span class="cell-sub">作业名称与模式</span></div>
+        <label>作业名称<span class="required-mark">*</span><input name="remark" value="{{ form.remark or '' }}" required placeholder="如：下载盘 → 媒体盘"></label>
+        <p class="hint">同步模式固定为<strong>移动（Move）</strong>：文件从源移动到目标后，源文件将被删除。</p>
+      </section>
+
+      <section class="surface">
+        <div class="section-head"><h2>路径</h2><span class="cell-sub">虚拟路径格式 /挂载名/相对路径</span></div>
+        <label>源路径<span class="required-mark">*</span><input name="srcPath" value="{{ form.srcPath or '' }}" required placeholder="/local/Downloads"></label>
+        <label>目标路径<span class="required-mark">*</span><input name="dstPath" value="{{ form.dstPath or '' }}" required placeholder="/media/Movies 或多目标用 : 分隔"></label>
+        <p class="hint">
+          可用存储目录（挂载）：
+          {% for m in mounts %}<code>{{ m.name }}</code>{% if not loop.last %} {% endif %}{% endfor %}
+          {% if not mounts %}暂未配置（请到「系统设置 → 存储目录」添加）{% endif %}
+        </p>
+      </section>
+
+      <section class="surface">
+        <div class="section-head"><h2>调度</h2><span class="cell-sub">间隔 / Cron / 手动</span></div>
+        <label>调度类型
+          <select name="isCron" id="isCron">
+            <option value="0" {{ 'selected' if (form.isCron or 0) == 0 }}>间隔</option>
+            <option value="1" {{ 'selected' if form.isCron == 1 }}>Cron</option>
+            <option value="2" {{ 'selected' if (form.isCron or 0) == 2 }}>手动</option>
+          </select>
+        </label>
+
+        <div data-sched="0">
+          <label>间隔(秒)<input name="interval" type="number" min="1" value="{{ form.interval or 3600 }}"></label>
+        </div>
+
+        <div data-sched="1">
+          <p class="hint">Cron 表达式字段（留空表示不限制，APScheduler 语义）。</p>
+          <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:12px">
+            <label>分钟<input name="minute" value="{{ form.minute or '' }}" placeholder="0"></label>
+            <label>小时<input name="hour" value="{{ form.hour or '' }}" placeholder="*"></label>
+            <label>日<input name="day" value="{{ form.day or '' }}" placeholder="*"></label>
+            <label>月<input name="month" value="{{ form.month or '' }}" placeholder="*"></label>
+            <label>星期(0-6)<input name="day_of_week" value="{{ form.day_of_week or '' }}" placeholder="*"></label>
+            <label>周(本年第几周)<input name="week" value="{{ form.week or '' }}" placeholder="*"></label>
+          </div>
+        </div>
+
+        <div data-sched="2">
+          <p class="hint">手动模式仅由「运行」按钮触发，不自动调度。</p>
+        </div>
+      </section>
+
+      <section class="surface">
+        <div class="section-head"><h2>过滤与大小</h2><span class="cell-sub">排除规则与文件大小范围</span></div>
+        <label>源目录模式
+          <select name="sourceMode">
+            <option value="0" {{ 'selected' if (form.sourceMode or 0) == 0 }}>常规</option>
+            <option value="1" {{ 'selected' if form.sourceMode == 1 }}>源目录模式（仅扫源比对快照）</option>
+          </select>
+        </label>
+        <label>排除规则<textarea name="exclude" placeholder="gitignore 风格，多规则用 : 分隔，如 *.tmp:cache">{{ form.exclude or '' }}</textarea></label>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+          <label>最小文件大小(字节)<input name="minFileSize" type="number" min="0" value="{{ form.minFileSize or '' }}"></label>
+          <label>最大文件大小(字节)<input name="maxFileSize" type="number" min="0" value="{{ form.maxFileSize or '' }}"></label>
+        </div>
+      </section>
+
+      <section class="surface">
+        <div class="section-head"><h2>状态</h2><span class="cell-sub">启用后按调度运行</span></div>
+        <fieldset>
+          <legend>启用</legend>
+          <label class="inline"><input type="checkbox" name="enable" value="1" {{ 'checked' if (form.enable or 0) == 1 }}>启用此作业</label>
+        </fieldset>
+      </section>
+
+      <div class="form-actions">
+        <button type="submit" class="btn primary">保存</button>
+        {% if is_edit %}
+        <form method="post" action="{{ url_for('sync.delete', job_id=job.id) }}" onsubmit="return confirm('确认删除该作业？');">
+          <button type="submit" class="btn danger">删除</button>
+        </form>
+        {% endif %}
+        <a class="btn ghost" href="{{ url_for('sync.index') }}">取消</a>
+      </div>
+    </div>
+  </form>
+</section>
+
+<script>
+(function () {
+  const sel = document.getElementById('isCron');
+  const groups = document.querySelectorAll('[data-sched]');
+  function syncSched() {
+    if (!sel) return;
+    const v = sel.value;
+    groups.forEach(function (g) {
+      g.style.display = (g.getAttribute('data-sched') === v) ? '' : 'none';
+    });
+  }
+  if (sel) {
+    sel.addEventListener('change', syncSched);
+    syncSched();
+  }
+})();
+</script>
+{% endblock %}

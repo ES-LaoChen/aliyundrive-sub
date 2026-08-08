@@ -141,20 +141,6 @@ def _auto_migrate() -> None:
             )
             logger.info("已迁移: subscriptions.source")
 
-        # TMDB 识别（新增订阅回填）：tmdb_id + poster_url 两列。
-        # 幂等：仅当列不存在时才 ALTER（沿用上面 cols 守卫写法）。
-        for col_name, col_type in (
-            ("tmdb_id", "VARCHAR(64) DEFAULT ''"),
-            ("poster_url", "TEXT DEFAULT ''"),
-        ):
-            if col_name not in cols:
-                conn.execute(
-                    text(
-                        f"ALTER TABLE subscriptions ADD COLUMN {col_name} {col_type}"
-                    )
-                )
-                logger.info("已迁移: subscriptions.%s", col_name)
-
         # SubStatus：订阅状态巡检所需两列（朴素 UTC / int）。
         #  - last_transfer_at：最后成功转存时间，空则回退 created_at 算完结超时。
         #  - link_fail_count：链接探测失败累计次数，达阈值 → 链接失效。

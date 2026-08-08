@@ -153,12 +153,55 @@ def build_services(settings: Settings) -> Services:
     # 仅在总开关开启且配置了频道时装配（TG_MONITOR_ENABLED=false 时完全无副作用）。
     # scheduler 需先于 tg_monitor 构造（tg_monitor 注入 scheduler），故先建占位、
     # 再回填 _tg_monitor（SchedulerService.__init__ 已保留 tg_monitor 形参供未来直传）。
+    #
+    # 启动自动恢复（修复“重启后无法自动监控”）：env 的 TG_MONITOR_* 仅用于容器/命令行
+    # 配置；UI「自动启动监控」开关保存在 KV（tg_monitor_enabled / tg_monitor_channels /
+    # tg_poll_interval / tg_proxy）。若 env 未开启但 KV 已开启，则把 KV 配置回灌到
+    # ``settings.TG_*`` 再据此构造 tg_monitor，确保无需手动点保存即可自动启动监控。
+    try:
+        from models import Setting as _KVSetting
+
+        with session_factory() as _db:
+            def _kv(key: str, default: str = "") -> str:
+                row = _db.query(_KVSetting).filter_by(key=key).first()
+                return row.value if row else default
+
+            kv_enabled = str(_kv("tg_monitor_enabled", "")).strip().lower() in (
+                "1", "true", "yes", "on", "y", "t",
+            )
+            if not settings.TG_MONITOR_ENABLED and kv_enabled:
+                kv_channels = (_kv("tg_monitor_channels", "") or "").strip()
+                kv_poll = _kv("tg_poll_interval", "")
+                kv_proxy = (_kv("tg_proxy", "") or "").strip()
+                if kv_channels:
+                    # 回灌到 settings（pydantic v2 实例默认允许属性赋值），
+                    # 使 env 构造分支与 tg_monitor 内部均读取到正确的 KV 配置。
+                    try:
+                        settings.TG_MONITOR_ENABLED = True
+                        settings.TG_MONITOR_CHANNELS = kv_channels
+                        if kv_poll.strip().isdigit():
+                            settings.TG_POLL_INTERVAL = max(60, int(kv_poll))
+                        settings.TG_PROXY = kv_proxy
+                        logger.info(
+                            "已从 KV 恢复 TG 监控配置（自动启动）：channels=%s",
+                            kv_channels,
+                        )
+                    except (AttributeError, TypeError):
+                        logger.warning("无法将 KV 监控配置回灌到 settings（跳过自动恢复）")
+    except Exception:
+        logger.exception("读取 TG 监控 KV 失败（不影响主流程）")
+
     tg_monitor = None
     if settings.TG_MONITOR_ENABLED and settings.TG_MONITOR_CHANNELS.strip():
         from core.tg_monitor import TGMonitorService
 
         tg_monitor = TGMonitorService(settings, session_factory, scheduler, notifier)
         scheduler._tg_monitor = tg_monitor
+
+    # ---- 同步管理（移植自 TaoSync）：作业编排 + 多后端存储目录 ----
+    from core.sync.service import SyncService
+
+    sync_service = SyncService(session_factory, services=None)
 
     # ---- 装配服务容器 ----
     services = Services(
@@ -176,7 +219,11 @@ def build_services(settings: Settings) -> Services:
         sub_lock=sub_lock,
         retry_policy=retry_policy,
         tg_monitor=tg_monitor,
+        sync_service=sync_service,
     )
+
+    # 回填 self.services（SyncService 需要主容器以取用 notifier）。
+    sync_service.services = services
 
     # ---- T-D4：启动时后台异步续跑 pending 任务 ----
     try:
@@ -329,6 +376,12 @@ def main() -> None:
         services.scheduler.register_substatus_poll(services)
     except Exception:
         logger.warning("注册 substatus_poll 巡检任务失败（不影响订阅调度）", exc_info=True)
+    # 启动同步管理：修正异常任务状态 + 重建启用作业调度（不阻塞 Web）。
+    if services.sync_service is not None:
+        try:
+            services.sync_service.init_jobs()
+        except Exception:
+            logger.warning("同步管理启动初始化失败（不影响主进程）", exc_info=True)
     logger.info("Web 启动于 %s:%s", settings.WEB_HOST, settings.WEB_PORT)
     # 生产请用 gunicorn -w 1（单 worker，避免多调度器）；此处用 Flask 内置服务器做 MVP。
     app.run(host=settings.WEB_HOST, port=settings.WEB_PORT, use_reloader=False)

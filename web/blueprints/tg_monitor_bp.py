@@ -469,7 +469,8 @@ def channel_detail_view(channel: str) -> str:
     从而把「一条监控事件」还原成「频道到底推送了什么内容 + 其中的链接是什么」，
     让用户在时间轴上直接阅读频道真实推送，而不是只看到事件类型或消息 ID。
     """
-    with get_session() as db:
+    svc = _services()
+    with svc.session_factory() as db:
         state = db.query(TGMonitorState).filter_by(channel=channel).first()
         raw_entries = (
             db.query(TGMonitorLog)

@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% from "macros.html" import page_head, badge, empty %}
+{% block title %}存储目录管理 · {{ app_name }}{% endblock %}
+{% block content %}
+{{ page_head('同步引擎', '存储目录管理', '配置多后端存储（local / smb / ftp / sftp / aliyun）作为同步源与目标') }}
+
+<section class="surface">
+  <div class="section-head"><h2>新增存储目录</h2><span class="cell-sub">引擎 ID {{ engine_id }}</span></div>
+  <form method="post" action="{{ url_for('settings.storage_add') }}">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+      <label>名称<span class="required-mark">*</span><input name="name" required placeholder="挂载名，如 local / media"></label>
+      <label>驱动类型<span class="required-mark">*</span>
+        <select name="driverType">
+          {% for d in drivers %}<option value="{{ d }}">{{ d }}</option>{% endfor %}
+        </select>
+      </label>
+    </div>
+    <label>配置(JSON)<textarea name="config" placeholder='本地示例：{}&#10;阿里云盘示例：{"refresh_token":"xxx","drive_type":"resource"}'></textarea></label>
+    <p class="hint">
+      各驱动配置字段：<br>
+      • <code>local</code>：<code>{"root_path":"/绝对/目录/路径"}</code>（必填，本地文件系统根）<br>
+      • <code>aliyun</code>：<code>refresh_token</code>、<code>drive_type</code>(resource/backup)、<code>api_url</code>、<code>oauth_url</code><br>
+      • <code>ftp</code>：<code>host</code>、<code>port</code>、<code>username</code>、<code>password</code>、<code>use_tls</code><br>
+      • <code>sftp</code>：<code>host</code>、<code>port</code>、<code>username</code>、<code>password</code> 或 <code>private_key</code>+<code>private_key_passphrase</code><br>
+      • <code>smb</code>：<code>host</code>、<code>port</code>、<code>username</code>、<code>password</code>、<code>share</code>、<code>domain</code>
+    </p>
+    <label class="inline"><input type="checkbox" name="enabled" value="1" checked>启用此存储目录</label>
+    <div class="form-actions">
+      <button type="submit" class="btn primary">添加</button>
+      <a class="btn ghost" href="{{ url_for('settings.index') }}">返回设置</a>
+    </div>
+  </form>
+</section>
+
+<section class="surface">
+  <div class="section-head"><h2>已有存储目录</h2><span class="cell-sub">共 {{ mounts|length }} 个</span></div>
+  <div class="table-wrap">
+    <table class="grid">
+      <thead>
+        <tr>
+          <th>名称</th>
+          <th>驱动类型</th>
+          <th>启用</th>
+          <th style="text-align:right">操作</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for m in mounts %}
+        <tr>
+          <td class="cell-main">{{ m.name }}</td>
+          <td class="cell-sub">{{ m.driverType }}</td>
+          <td>{{ badge('bool', '1' if m.enabled else '0', text=('启用' if m.enabled else '禁用')) }}</td>
+          <td>
+            <div class="row-actions">
+              <form method="post" action="{{ url_for('settings.storage_delete', mount_id=m.id) }}" onsubmit="return confirm('确认删除该存储目录？');">
+                <button class="mini danger" type="submit">删除</button>
+              </form>
+            </div>
+          </td>
+        </tr>
+      {% else %}
+        <tr><td colspan="4">{{ empty('还没有任何存储目录，请在上方添加。') }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

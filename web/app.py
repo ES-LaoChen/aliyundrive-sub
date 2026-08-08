@@ -53,6 +53,7 @@ def create_app(services: Services) -> Flask:
     from web.blueprints.logs_bp import bp as logs_bp
     from web.blueprints.subscription_detail_bp import bp as sub_detail_bp
     from web.blueprints.tg_monitor_bp import bp as tg_monitor_bp
+    from web.blueprints.sync_bp import bp as sync_bp
 
     app.register_blueprint(sub_bp)
     app.register_blueprint(settings_bp)
@@ -60,6 +61,7 @@ def create_app(services: Services) -> Flask:
     app.register_blueprint(logs_bp)
     app.register_blueprint(sub_detail_bp)
     app.register_blueprint(tg_monitor_bp)
+    app.register_blueprint(sync_bp)
 
     @app.route("/")
     def index():

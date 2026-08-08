@@ -26,9 +26,6 @@ class SubscriptionCreate(BaseModel):
     rename_suffix: str = ""
     status: str = "active"
     remark: str = ""
-    # TMDB 识别（新增订阅回填）：数字 ID 与海报地址（由前端获取后写入）
-    tmdb_id: str = ""
-    poster_url: str = ""
 
 
 class SubscriptionUpdate(SubscriptionCreate):
@@ -36,10 +33,8 @@ class SubscriptionUpdate(SubscriptionCreate):
 
 
 class SettingsForm(BaseModel):
-    """设置页表单（TMDB / 订阅状态巡检 / Telegram 通知）。"""
+    """设置页表单（订阅状态巡检 / Telegram 通知）。"""
 
-    # TMDB v3 API Key（存于 Setting KV 表，新增订阅时自动读取调用）
-    tmdb_api_key: str = ""
     # 订阅状态巡检（SubStatus）配置：全部以字符串承载，保存时按 KV 落库，
     # 运行时由 core.substatus_poller.load_poll_config 解析为 int / bool。
     link_fail_threshold: str = "3"               # 链接访问失败次数阈值

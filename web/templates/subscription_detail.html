@@ -23,18 +23,6 @@
       <li><span>备注</span><span>{{ sub.remark or '—' }}</span></li>
     </ul>
   </section>
-
-  <section class="surface">
-    <div class="section-head"><h2>媒体库信息</h2></div>
-    {% if sub.poster_url %}
-      <img src="{{ sub.poster_url }}" alt="海报" style="max-width:120px;border-radius:10px;box-shadow:var(--shadow-sm);margin-bottom:12px">
-    {% else %}
-      <p class="muted" style="margin-bottom:12px">暂无海报</p>
-    {% endif %}
-    <ul class="kv">
-      <li><span>TMDB ID</span><span>{{ sub.tmdb_id or '—' }}</span></li>
-    </ul>
-  </section>
 </div>
 
 <section class="surface">
