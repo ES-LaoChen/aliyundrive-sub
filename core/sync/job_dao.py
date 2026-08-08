@@ -112,7 +112,11 @@ def get_job_by_task_id(db, task_id: int) -> SyncJob:
 
 
 def add_job(db, job: dict) -> int:
-    row = SyncJob(**{k: v for k, v in job.items() if k != "id"})
+    data = {k: v for k, v in job.items() if k != "id"}
+    # 新作业始终填充 createTime，确保稳定排到列表最前、立即可见
+    if not data.get("createTime"):
+        data["createTime"] = int(time.time())
+    row = SyncJob(**data)
     db.add(row)
     db.flush()
     return row.id
