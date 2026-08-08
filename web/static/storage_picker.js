@@ -52,6 +52,9 @@
       this.modal.addEventListener('click', function (e) {
         if (e.target === self.modal) self.close();
       });
+      // 初始保证隐藏（CSS 通过 .open 类控制 display）。
+      this.modal.classList.remove('open');
+      this.modal.hidden = true;
     }
     if (this.confirmBtn) {
       this.confirmBtn.addEventListener('click', function () { self.confirm(); });
@@ -69,13 +72,20 @@
               : this.initialPath || (this.backend === 'local' ? '/' : '/');
     this.currentPath = start;
     this.selectedPath = start;
-    if (this.modal) this.modal.hidden = false;
+    // 模态框显示由 CSS `.modal-mask.open` 控制（原生 hidden 属性会被 display:none 覆盖）。
+    if (this.modal) {
+      this.modal.hidden = false;
+      this.modal.classList.add('open');
+    }
     if (this.searchEl) this.searchEl.value = '';
     this.load();
   };
 
   StoragePicker.prototype.close = function () {
-    if (this.modal) this.modal.hidden = true;
+    if (this.modal) {
+      this.modal.classList.remove('open');
+      this.modal.hidden = true;
+    }
   };
 
   StoragePicker.prototype._fetch = function (url) {
