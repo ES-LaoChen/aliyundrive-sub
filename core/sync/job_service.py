@@ -208,12 +208,13 @@ def edit_job_client(job: dict, session, services=None, session_factory=None):
     clean_job_input(job)
     sf = session_factory or (getattr(services, "session_factory", None) if services else None)
     client = get_job_client_by_id(session, job_id, services, session_factory=sf)
-    if client.job.enable == 1 and client.job.is_cron != 2:
+    # 必须从「当前请求 session」重新加载 job，禁止读缓存的 client.job（可能已 detached）。
+    row = get_job_by_id(session, job_id)
+    if row.enable == 1 and row.is_cron != 2:
         raise ValueError("请先禁用作业再编辑")
     clear_snapshot = any(
-        getattr(client.job, key, None) != job.get(key) for key in SOURCE_SNAPSHOT_FIELDS
+        getattr(row, key, None) != job.get(key) for key in SOURCE_SNAPSHOT_FIELDS
     )
-    old_job = client.job
     client.stop_job(remove=True)
     new_client = None
     try:
@@ -250,7 +251,8 @@ def do_all_job_manual(session, services=None):
     sf = getattr(services, "session_factory", None) if services else None
     for job_item in job_list:
         client = get_job_client_by_id(session, job_item.id, services, session_factory=sf)
-        if client.job.enable == 1:
+        # 从当前请求 session 重新加载，避免读缓存 client.job（可能已 detached）。
+        if get_job_by_id(session, job_item.id).enable == 1:
             client.do_manual(session_factory=sf)
 
 
@@ -271,7 +273,9 @@ def continue_all_job(session):
 def do_job_manual(job_id: int, session, services=None, operator="手动"):
     sf = getattr(services, "session_factory", None) if services else None
     client = get_job_client_by_id(session, int(job_id), services, session_factory=sf)
-    if client.job.enable != 1:
+    # 必须从「当前请求 session」重新加载 job，禁止读缓存的 client.job（可能已 detached）。
+    row = get_job_by_id(session, int(job_id))
+    if row.enable != 1:
         raise ValueError("已禁用的作业不能运行")
     client.do_manual(operator=operator, session_factory=sf)
 
@@ -293,7 +297,8 @@ def continue_job(job_id: int, session, services=None):
 def pause_job(job_id: int, session, services=None):
     sf = getattr(services, "session_factory", None) if services else None
     client = get_job_client_by_id(session, int(job_id), services, session_factory=sf)
-    if client.job.is_cron == 2:
+    # 从当前请求 session 重新加载，避免读缓存 client.job（可能已 detached）。
+    if get_job_by_id(session, int(job_id)).is_cron == 2:
         raise ValueError("手动作业不能禁用")
     client.stop_job()
 
