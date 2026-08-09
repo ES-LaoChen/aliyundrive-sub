@@ -330,11 +330,12 @@ def get_job_list_view(session, req=None):
                     task_num = parsed
             except (TypeError, ValueError):
                 pass
-        task.all_num = task_num.get("allNum", task.get("itemAllNum") or 0)
-        task.success_num = task_num.get("successNum", task.get("itemSuccessNum") or 0)
-        task.fail_num = task_num.get("failNum", task.get("itemFailNum") or 0)
-        task.other_num = task_num.get("otherNum", task.get("itemOtherNum") or 0)
-        task.duration = task_num.get("duration")
+        # task 是 dict（来自 get_latest_job_task_list），必须用下标赋值，不能用属性赋值。
+        task["all_num"] = task_num.get("allNum", task.get("itemAllNum") or 0)
+        task["success_num"] = task_num.get("successNum", task.get("itemSuccessNum") or 0)
+        task["fail_num"] = task_num.get("failNum", task.get("itemFailNum") or 0)
+        task["other_num"] = task_num.get("otherNum", task.get("itemOtherNum") or 0)
+        task["duration"] = task_num.get("duration")
         row.last_task = task
     return result
 
