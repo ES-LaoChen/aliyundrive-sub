@@ -1157,11 +1157,15 @@ class JobClient:
         if self.current_job_task:
             self.current_job_task.break_flag = True
 
-    def get_progress(self, recovered_base: int = 0) -> dict:
+    def get_progress(self, recovered_base: int = 0, session=None) -> dict:
         """聚合实时进度（持久化 sync_progress），供 Web 轮询 / CLI 展示。
 
         recovered_base：本次运行基于「历史已成功文件数」的恢复基数（中断恢复显示），
         计入整体进度的「已完成」分母，使跨运行累计完成度正确。
+
+        session：必须传入「调用方（请求线程）自己的、存活的 session」。
+        严禁复用 self.session —— 它是后台运行线程私有的、会随线程退出而关闭，
+        跨线程/跨生命周期使用会触发 "Instance is not bound to a Session"。
         """
         from core.sync.job_dao import (
             get_progress_active,
@@ -1181,7 +1185,8 @@ class JobClient:
                 "scanFinish": False,
             }
         task_id = task.task_id
-        session = self.session
+        # 必须使用调用方（请求线程）自己的 session，绝不复用后台线程私有的 self.session。
+        session = session or self.session
         summary = get_progress_summary(session, task_id)
         # 整体进度叠加恢复基数：已完成 = 本次 done + 历史 recovered。
         done_with_recovered = summary["done"] + recovered_base

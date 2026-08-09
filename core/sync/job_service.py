@@ -360,7 +360,9 @@ def get_job_progress(job_id: int, session, services=None):
         from core.sync.job_dao import count_progress_recovered
 
         recovered = count_progress_recovered(session, int(job_id), current_task_id)
-    return client.get_progress(recovered_base=recovered)
+    # 传入请求线程自己的 session，避免跨线程复用后台线程私有的 self.session
+    # （会触发 "Instance is not bound to a Session"）。
+    return client.get_progress(recovered_base=recovered, session=session)
 
 
 def set_session(session) -> None:
