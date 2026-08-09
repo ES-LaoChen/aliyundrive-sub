@@ -119,6 +119,25 @@ def engine_mounts_overlap(db, engine_id: int, first_path: str, second_path: str)
     return mount_paths_overlap(mounts, first_path, second_path)
 
 
+def validate_mounts_exist(db, engine_id: int, *paths: str) -> None:
+    """校验虚拟路径的挂载名段都已注册为有效挂载，否则在作业创建/编辑时即报错，
+    避免运行到扫描源目录时才抛出 'storage directory not found'。"""
+    names = {m["name"] for m in get_mount_list(db, engine_id)}
+    for raw in paths:
+        if not raw:
+            continue
+        for p in str(raw).split(":"):
+            seg = normalize_path(p, allow_root=False).strip("/").split("/", 1)[0]
+            if not seg:
+                continue
+            if seg not in names:
+                raise ValueError(
+                    "路径 '{}' 引用的存储目录 '{}' 不存在，请先在「存储目录管理」中创建该挂载".format(
+                        p, seg
+                    )
+                )
+
+
 def _validate_unique_name(db, engine_id: int, name: str, exclude_id=None):
     for row in db.query(SyncStorageMount).filter_by(engineId=engine_id).all():
         if row.name.casefold() == name.casefold() and row.id != exclude_id:
@@ -282,6 +301,10 @@ def add_mount(db, data: dict) -> int:
     )
     db.add(mount)
     db.flush()
+    # 新增挂载后必须让缓存的 TaoSyncClient 失效，否则已存在的进程内单例
+    # （由目录选择器 / 上次运行作业构建）的 self.mounts 不含新挂载，运行时
+    # resolve() 会误报 "storage directory not found: <新挂载名>"。
+    invalidate_client(engine_id)
     return mount.id
 
 

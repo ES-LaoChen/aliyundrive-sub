@@ -170,6 +170,10 @@ def clean_job_input(job: dict):
                 from core.sync import engine as se
                 if se.engine_mounts_overlap(_session_for(), engine_id, job["srcPath"], dst_path):
                     raise ValueError("源路径与目标路径存在重叠，无法同步")
+                # 创建/编辑即校验挂载存在，避免运行时才报 "storage directory not found"。
+                se.validate_mounts_exist(
+                    _session_for(), engine_id, job["srcPath"], dst_path
+                )
             elif virtual_paths_overlap(job["srcPath"], dst_path):
                 raise ValueError("源路径与目标路径存在重叠，无法同步")
     if (job["minFileSize"] is not None
