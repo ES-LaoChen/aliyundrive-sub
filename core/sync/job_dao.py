@@ -77,7 +77,8 @@ def get_latest_job_task_list(db, job_ids: list) -> list:
                 "errMsg": task.errMsg,
                 "runTime": task.runTime,
                 "taskNum": task.taskNum,
-                "createTime": task.createTime,
+                # SyncTask 模型无 createTime 列，用 runTime（任务执行时间）填充该显示字段。
+                "createTime": task.runTime,
                 "itemAllNum": item_all,
                 "itemSuccessNum": item_success,
                 "itemFailNum": item_fail,
