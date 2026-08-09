@@ -95,10 +95,7 @@ def notify_task(job, status, task_num, duration_text, size_text):
         return
     try:
         title, content = SyncNotifyAdapter.build(job, status, task_num, duration_text, size_text)
-        job2 = get_job_by_id(svc.session_factory(), job.id)
-        job2._notify_svc = svc
-        title, content = SyncNotifyAdapter.build(job2, status, task_num, duration_text, size_text)
-        notifier.notify_sync(title, content)
+        notifier.send(title, content)
     except Exception:
         logger.exception("同步通知失败")
 
@@ -111,7 +108,9 @@ def init_jobs(session, services=None) -> None:
     sf = getattr(services, "session_factory", None) if services else None
     for item in get_job_list(session):
         try:
-            add_job_client(item, session, is_init=True, services=services, session_factory=sf)
+            # 重建已存在作业的 JobClient 并恢复调度（get_job_client_by_id 从 ORM
+            # 构建，不会重复插入；add_job_client 期望 dict 且会再插一条，不可用）。
+            get_job_client_by_id(session, item.id, services, session_factory=sf)
         except Exception:
             logger.exception("启动添加作业 %s 失败", getattr(item, "id", "?"))
 
@@ -137,7 +136,7 @@ def _notify_with_services(services, job, status, task_num, duration_text, size_t
         return
     try:
         title, content = SyncNotifyAdapter.build(job, status, task_num, duration_text, size_text)
-        notifier.notify_sync(title, content)
+        notifier.send(title, content)
     except Exception:
         logger.exception("同步通知失败")
 
