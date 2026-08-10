@@ -130,6 +130,8 @@ class JobTask:
         self.sourceSnapshot = {}
         self.sourceScanAttempted = False
         self.sourceScanFailed = False
+        self._scanning = False
+        self.scannedEntries = 0
         self.previousSourceSnapshot = None
         self.sourceSnapshotIdentity = job_dao.source_snapshot_identity(self.job)
         self.currentTasks = {}
@@ -185,6 +187,7 @@ class JobTask:
             'duration': int(self.lastWatching - self.createTime),
             'firstSync': int(self.firstSync) if self.firstSync is not None else None,
             'num': {}, 'size': {},
+            'scanningCount': self.scannedEntries,
         }
         for key, val in keyValSpace.items():
             result['num'][key] = len(currentTasks[val])
@@ -378,13 +381,14 @@ class JobTask:
         })
 
     def sync(self):
-        srcPath = self.normalizeRoot(self.job['srcPath'])
-        jobExclude = self.job['exclude']
-        spec = None
-        if jobExclude is not None:
-            spec = PathSpec.from_lines(GitWildMatchPattern, jobExclude.split(':'))
-        dstPathList = [self.normalizeRoot(item) for item in self.job['dstPath'].split(':')]
+        self._scanning = True
         try:
+            srcPath = self.normalizeRoot(self.job['srcPath'])
+            jobExclude = self.job['exclude']
+            spec = None
+            if jobExclude is not None:
+                spec = PathSpec.from_lines(GitWildMatchPattern, jobExclude.split(':'))
+            dstPathList = [self.normalizeRoot(item) for item in self.job['dstPath'].split(':')]
             pathsOverlap = getattr(self.alistClient, 'pathsOverlap', virtual_paths_overlap)
             if any(pathsOverlap(srcPath, dstPath) for dstPath in dstPathList):
                 raise ValueError("来源与目录存在重叠，已拒绝执行")
@@ -408,6 +412,7 @@ class JobTask:
             self.copyHook(srcPath, None, None, None, status=7, errMsg=str(e), isPath=1)
         finally:
             self.scanFinish = True
+            self._scanning = False
 
     def scanSourceTree(self, path, spec, rootPath):
         if self.breakFlag:
@@ -532,7 +537,10 @@ class JobTask:
 
     def listDir(self, path, firstDst, spec, rootPath, isSrc=True):
         useCache = 1 if isSrc and not firstDst else self.job["useCache{}".format('S' if isSrc else 'T')]
-        scanInterval = self.job["scanInterval{}".format('S' if isSrc else 'T')]
+        # 扫描阶段（sync 递归列举整棵目录树）豁免 scanInterval 限流：
+        # scanInterval 的语义是“两次同步任务之间”的节流，由调度器负责；
+        # 若在此处逐目录 sleep，多层/多目录源会被乘法放大成“持续扫描”。
+        scanInterval = 0 if self._scanning else self.job["scanInterval{}".format('S' if isSrc else 'T')]
         try:
             entries, details = self.readDirectory(path, useCache, scanInterval, spec, rootPath)
             if isSrc and firstDst:
@@ -578,6 +586,7 @@ class JobTask:
 
     def recordSourceEntries(self, path, rootPath, entries, details=None):
         self.sourceScanAttempted = True
+        self.scannedEntries += len(entries)
         relativeBase = path[len(rootPath):].strip('/') if path.startswith(rootPath) else ''
         for name, size in entries.items():
             isDirectory = name.endswith('/')

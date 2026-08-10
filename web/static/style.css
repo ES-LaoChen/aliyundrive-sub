@@ -1000,6 +1000,7 @@ details.surface[open] > summary::after { transform: rotate(-135deg); margin-top:
 }
 .scan-status.scanning { background: var(--info-50, #eef2ff); color: var(--info, #4f46e5); }
 .scan-status.done { background: var(--ok-50, #ecfdf3); color: var(--ok, #16a34a); }
+.scan-count { font-weight: 500; opacity: 0.85; font-size: 13px; }
 .scan-dot { width: 16px; height: 16px; border-radius: 50%; flex: none; position: relative; }
 .scan-dot.scanning {
   border: 2px solid var(--info, #4f46e5);

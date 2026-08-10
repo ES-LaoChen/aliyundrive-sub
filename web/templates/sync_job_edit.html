@@ -156,6 +156,7 @@
         </label>
         <label>源扫描间隔（秒）
           <input name="scanIntervalS" type="number" min="0" value="{{ form.scanIntervalS or 0 }}">
+          <span class="hint">两次列举之间的最小间隔（限流），仅作用于复制/删除阶段；单次扫描会一次性遍历整棵目录树，无需在此设大，否则会拖慢扫描。</span>
         </label>
         <label>目标扫描缓存
           <select name="useCacheT">
@@ -165,6 +166,7 @@
         </label>
         <label>目标扫描间隔（秒）
           <input name="scanIntervalT" type="number" min="0" value="{{ form.scanIntervalT or 0 }}">
+          <span class="hint">两次列举之间的最小间隔（限流），用于降低对存储后端的请求频率。</span>
         </label>
       </div>
     </fieldset>

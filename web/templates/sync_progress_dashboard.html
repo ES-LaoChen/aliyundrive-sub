@@ -11,6 +11,7 @@
   <div class="scan-status" id="scanStatus">
     <span class="scan-dot scanning"></span>
     <span class="scan-text">正在扫描来源目录…</span>
+    <span class="scan-count" id="scanCount"></span>
   </div>
 
   {# 统计概览 #}
@@ -78,18 +79,22 @@
     while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
     return (i === 0 ? v : v.toFixed(2)) + ' ' + u[i];
   }
-  function setScan(scanFinish) {
+  function setScan(scanFinish, scanningCount) {
     var el = document.getElementById('scanStatus');
     var dot = el.querySelector('.scan-dot');
     var txt = el.querySelector('.scan-text');
+    var cnt = document.getElementById('scanCount');
     if (scanFinish) {
       el.classList.add('done'); el.classList.remove('scanning');
       dot.className = 'scan-dot done';
       txt.textContent = '来源目录扫描完成';
+      cnt.textContent = '';
     } else {
       el.classList.add('scanning'); el.classList.remove('done');
       dot.className = 'scan-dot scanning';
       txt.textContent = '正在扫描来源目录…';
+      cnt.textContent = (scanningCount != null && scanningCount > 0)
+        ? ('（已扫描 ' + scanningCount + ' 项）') : '';
     }
   }
   function render(data) {
@@ -124,7 +129,7 @@
     document.getElementById('sizeInfo').textContent =
       '已同步大小 ' + doneSize + (failSize !== '—' ? '，失败大小 ' + failSize : '');
 
-    setScan(!!data.scanFinish);
+    setScan(!!data.scanFinish, data.scanningCount);
 
     // doingTask
     var body = document.getElementById('doingBody');
