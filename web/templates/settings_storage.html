@@ -58,7 +58,13 @@
     <form method="post" action="{{ url_for('storage_picker_bp.add_mount') }}" class="form-grid" id="mountForm">
       <input type="hidden" name="engineId" id="mountEngineId" value="">
       <label>目录名称（挂载名，不可含 / : 等）<input name="name" placeholder="例如：媒体盘"></label>
-      <label>根目录绝对路径<input name="config" placeholder='{"root_path":"/data/media"}'></label>
+      <label class="col-dir">根目录绝对路径
+        <span class="dir-input-row">
+          <input name="root_path" id="rootPathInput" placeholder="例如：/data/media 或 D:\media" autocomplete="off">
+          <button type="button" class="btn ghost" id="browseLocalBtn">浏览…</button>
+        </span>
+        <span class="cell-sub">填服务器上已存在的绝对路径；也可点「浏览…」从服务器目录树中点选。</span>
+      </label>
       <label class="checkbox"><input type="checkbox" name="enabled" value="1" checked> 启用</label>
       <div class="span-2 form-actions">
         <button class="btn primary" type="submit">添加目录</button>
@@ -67,24 +73,130 @@
   </details>
 </section>
 
+{# 本地目录交互式选择器（模态框） #}
+<div class="modal-mask" id="localPickerModal" hidden>
+  <div class="modal-panel">
+    <div class="modal-head">
+      <h2>选择服务器本地目录</h2>
+      <button type="button" class="btn ghost mini" id="localPickerClose" title="关闭">×</button>
+    </div>
+    <nav class="breadcrumb picker-breadcrumb" id="localPickerCrumbs"></nav>
+    <div class="modal-body" id="localPickerList"><div class="empty">加载中…</div></div>
+    <div class="modal-foot">
+      <span class="hint" id="localPickerHint">点击文件夹进入子目录，选定后自动填入路径</span>
+      <div>
+        <button type="button" class="btn ghost" id="localPickerCancel">取消</button>
+        <button type="button" class="btn primary" id="localPickerConfirm">选定此目录</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
 (function () {
-  // 找到内置 taosync 引擎 id 填入挂载表单
-  fetch('{{ url_for("storage_picker_bp.index") }}').catch(function(){});
-  // 通过挂载接口拉取内置引擎目录
-  function loadMounts() {
-    var el = document.getElementById('mountList');
-    if (!el) return;
-    // 先找内置引擎：遍历引擎列表接口不便，这里直接调用 mounts 接口（默认内置）
-    fetch('{{ url_for("storage_picker_bp.index") }}', {headers:{'Accept':'text/html'}})
-      .catch(function(){});
-  }
-  // 简化：页面渲染时由后端注入引擎列表，这里尝试从已知的第一个 taosync 引擎取 id
+  // 填入内置 taosync 引擎 id 到挂载表单
   var engines = {{ engines | tojson }};
   var builtin = engines.find(function(e){ return e.engineType === 'taosync'; });
   if (builtin) {
     document.getElementById('mountEngineId').value = builtin.id;
   }
+
+  // ── 本地目录交互式选择器 ──
+  var modal = document.getElementById('localPickerModal');
+  var listEl = document.getElementById('localPickerList');
+  var crumbsEl = document.getElementById('localPickerCrumbs');
+  var hintEl = document.getElementById('localPickerHint');
+  var rootPathInput = document.getElementById('rootPathInput');
+  var selectedPath = '';
+
+  function crumbPath(arr) {
+    return arr.join('\\');
+  }
+
+  function renderCrumbs(trail) {
+    // trail: [{name, path}]，最后一个是当前目录
+    crumbsEl.innerHTML = '';
+    trail.forEach(function (c, i) {
+      var a = document.createElement('a');
+      a.href = '#';
+      a.textContent = c.name || '/';
+      a.addEventListener('click', function (e) {
+        e.preventDefault();
+        loadDir(c.path, trail.slice(0, i + 1));
+      });
+      crumbsEl.appendChild(a);
+      if (i < trail.length - 1) {
+        var sep = document.createElement('span');
+        sep.className = 'sep';
+        sep.textContent = ' / ';
+        crumbsEl.appendChild(sep);
+      }
+    });
+  }
+
+  function loadDir(path, trail) {
+    selectedPath = path || '';
+    hintEl.textContent = path ? ('当前：' + path) : '点击文件夹进入子目录';
+    listEl.innerHTML = '<div class="empty">加载中…</div>';
+    var url = '{{ url_for("storage_picker_bp.local_browse") }}';
+    if (path) url += '?path=' + encodeURIComponent(path);
+    fetch(url).then(function (r) { return r.json(); }).then(function (data) {
+      if (data.error) {
+        listEl.innerHTML = '<div class="empty">错误：' + data.error + '</div>';
+        return;
+      }
+      var roots = data.roots || [];
+      var dirs = data.dirs || [];
+      if (!roots.length && !dirs.length) {
+        listEl.innerHTML = '<div class="empty">该目录下没有子目录</div>';
+        return;
+      }
+      var ul = document.createElement('ul');
+      ul.className = 'fp-list';
+      roots.concat(dirs).forEach(function (d) {
+        var li = document.createElement('li');
+        li.className = 'fp-item';
+        var a = document.createElement('a');
+        a.href = '#';
+        a.textContent = '📁 ' + d.name;
+        a.addEventListener('click', function (e) {
+          e.preventDefault();
+          var newTrail = (d.path === selectedPath || !path)
+            ? [{ name: d.name, path: d.path }]
+            : (trail || []).concat([{ name: d.name, path: d.path }]);
+          loadDir(d.path, newTrail);
+        });
+        li.appendChild(a);
+        ul.appendChild(li);
+      });
+      listEl.innerHTML = '';
+      listEl.appendChild(ul);
+      if (path) renderCrumbs(trail || [{ name: path, path: path }]);
+      else crumbsEl.innerHTML = '';
+    }).catch(function (e) {
+      listEl.innerHTML = '<div class="empty">加载失败：' + e + '</div>';
+    });
+  }
+
+  function openPicker() {
+    modal.hidden = false;
+    loadDir('', []);
+  }
+  function closePicker() {
+    modal.hidden = true;
+    selectedPath = '';
+  }
+
+  document.getElementById('browseLocalBtn').addEventListener('click', openPicker);
+  document.getElementById('localPickerClose').addEventListener('click', closePicker);
+  document.getElementById('localPickerCancel').addEventListener('click', closePicker);
+  document.getElementById('localPickerConfirm').addEventListener('click', function () {
+    if (selectedPath) rootPathInput.value = selectedPath;
+    closePicker();
+  });
+  modal.addEventListener('click', function (e) {
+    if (e.target === modal) closePicker();
+  });
 })();
 </script>
 {% endblock %}

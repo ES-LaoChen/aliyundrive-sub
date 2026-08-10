@@ -721,6 +721,19 @@ details.subconfig > summary:focus-visible { outline: 2px solid var(--primary); o
 }
 .fp-item:hover { border-color: var(--primary-150); background: var(--primary-50); }
 
+/* 本地目录选择器模态框（settings_storage.html） */
+.modal-mask:not([hidden]) { display: flex; }
+.modal-foot {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 14px 20px; border-top: 1px solid var(--border); flex-wrap: wrap;
+}
+.modal-foot .hint { font-size: 12.5px; color: var(--muted); }
+.modal-foot > div { display: flex; gap: 10px; }
+/* 表单内：根目录路径输入行（输入框 + 浏览按钮并排） */
+.dir-input-row { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
+.dir-input-row input { flex: 1; min-width: 0; }
+.col-dir input { width: 100%; }
+
 /* =============================================================
    提示条
    ============================================================= */

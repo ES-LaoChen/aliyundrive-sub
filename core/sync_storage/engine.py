@@ -279,6 +279,16 @@ class StorageService:
             driver.list("/")
         return dict(getattr(driver, "config", config))
 
+    def _normalize_driver_config_safe(self, driver_type, config):
+        """同 _normalize_driver_config，但把底层驱动的校验异常转译为清晰中文提示。"""
+        try:
+            return self._normalize_driver_config(driver_type, config)
+        except ValueError as e:
+            msg = str(e)
+            if "root_path" in msg:
+                raise ValueError("请填写「根目录绝对路径」（例如 /data/media 或 D:\\media）")
+            raise
+
     def add_mount(self, data):
         engine_id = int(data["engineId"])
         _require_taosync(self._engine_dao.get_engine_by_id(engine_id))
@@ -289,7 +299,7 @@ class StorageService:
             raise ValueError("存储配置必须是一个对象")
         config = dict(raw_config)
         self._validate_unique_name(engine_id, name)
-        config = self._normalize_driver_config(driver_type, config)
+        config = self._normalize_driver_config_safe(driver_type, config)
         mount_id = self._mount_dao.add_mount({
             "engineId": engine_id,
             "name": name,
@@ -314,7 +324,7 @@ class StorageService:
         if not isinstance(raw_config, dict):
             raise ValueError("存储配置必须是一个对象")
         config = {**old["config"], **dict(raw_config)}
-        config = self._normalize_driver_config(driver_type, config)
+        config = self._normalize_driver_config_safe(driver_type, config)
         self._mount_dao.update_mount({
             "id": mount_id,
             "name": name,

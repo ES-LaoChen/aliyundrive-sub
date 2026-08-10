@@ -53,11 +53,7 @@ def mounts(engine_id: int):
 def add_mount():
     sync = _sync()
     data = dict(request.form.to_dict())
-    config_raw = data.get("config") or "{}"
-    try:
-        config = json.loads(config_raw) if isinstance(config_raw, str) else config_raw
-    except (TypeError, ValueError):
-        config = {}
+    config = _build_local_config(data)
     payload = {
         "engineId": int(data.get("engineId")),
         "name": data.get("name", "").strip(),
@@ -74,15 +70,36 @@ def add_mount():
     return redirect(url_for("storage_picker_bp.index"))
 
 
+def _build_local_config(data):
+    """从表单构造 local 驱动的 config。
+
+    兼容两种填写方式：
+    - 直接字段 ``root_path``（推荐，交互式选择器/手动输入都用它）；
+    - 旧的 ``config`` JSON 字符串（高级用法，作为补充覆盖）。
+
+    只有当 ``root_path`` 既不在表单里、又在 JSON 中缺失时才回退为空对象，
+    由后续驱动校验抛出明确的「请填写根目录绝对路径」提示。
+    """
+    config_raw = data.get("config") or "{}"
+    try:
+        extra = json.loads(config_raw) if isinstance(config_raw, str) else config_raw
+    except (TypeError, ValueError):
+        extra = {}
+    if not isinstance(extra, dict):
+        extra = {}
+
+    root_path = (data.get("root_path") or "").strip()
+    config = dict(extra)
+    if root_path:
+        config["root_path"] = root_path
+    return config
+
+
 @bp.route("/mount/<int:mount_id>", methods=["POST"])
 def update_mount(mount_id: int):
     sync = _sync()
     data = dict(request.form.to_dict())
-    config_raw = data.get("config") or "{}"
-    try:
-        config = json.loads(config_raw) if isinstance(config_raw, str) else config_raw
-    except (TypeError, ValueError):
-        config = {}
+    config = _build_local_config(data)
     payload = {
         "id": mount_id,
         "engineId": int(data.get("engineId")),
@@ -180,5 +197,49 @@ def browse():
                 else "{}{}/{}".format(path, mount_name, name)
             result.append({"name": name, "vpath": vpath})
         return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/local-browse", methods=["GET"])
+def local_browse():
+    """基于服务器本地文件系统浏览目录，供「本地存储目录」交互式选择器使用。
+
+    参数：
+      path：要列出的目录绝对路径。省略时返回本机所有盘符（Windows）或根（*nix）。
+    返回：{ path, parent, dirs:[{name, path}], roots:[...] }
+    """
+    import os
+
+    req_path = (request.args.get("path") or "").strip()
+    try:
+        if not req_path:
+            # 返回根列表：Windows 盘符或 unix 根
+            if os.name == "nt":
+                import string
+                roots = []
+                for d in string.ascii_uppercase:
+                    root = "{}:\\".format(d)
+                    if os.path.isdir(root):
+                        roots.append({"name": root, "path": root})
+            else:
+                roots = [{"name": "/", "path": "/"}]
+            return jsonify({"path": "", "parent": "", "dirs": [], "roots": roots})
+
+        base = os.path.abspath(req_path)
+        if not os.path.isdir(base):
+            return jsonify({"error": "目录不存在：{}".format(req_path)}), 400
+        dirs = []
+        for name in sorted(os.listdir(base)):
+            full = os.path.join(base, name)
+            if os.path.isdir(full):
+                dirs.append({"name": name, "path": full})
+        parent = os.path.dirname(base) if base not in ("/", "") else ""
+        return jsonify({
+            "path": base,
+            "parent": parent,
+            "dirs": dirs,
+            "roots": [],
+        })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
