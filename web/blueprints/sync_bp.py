@@ -176,7 +176,14 @@ def progress(job_id: int):
         data = sync.get_job_current(job_id)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-    return jsonify(data or {"scanFinish": False, "doingTask": []})
+    # 前端轮询（Accept: application/json 或 ?format=json）返回 JSON；
+    # 普通页面访问渲染实时进度仪表盘。
+    wants_json = request.args.get("format") == "json" or \
+        request.headers.get("Accept", "").startswith("application/json")
+    if wants_json:
+        return jsonify(data or {"scanFinish": False, "doingTask": []})
+    return render_template("sync_progress_dashboard.html", job_id=job_id,
+                           initial=data or {"scanFinish": False, "doingTask": []})
 
 
 @bp.route("/tasks/<int:job_id>", methods=["GET"])
@@ -215,7 +222,7 @@ def task_items(job_id: int, task_id: int):
     except Exception as e:
         logger.exception("读取任务条目失败")
         items = {"dataList": [], "total": 0}
-    return render_template("partials/sync_task_items.html", job_id=job_id,
+    return render_template("sync_task_items.html", job_id=job_id,
                            task_id=task_id, items=items)
 
 
