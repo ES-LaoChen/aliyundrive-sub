@@ -21,6 +21,22 @@ def _list_dir(path):
     entries = []
     for name in os.listdir(path):
         full = os.path.join(path, name)
+        # 符号链接一律当作普通文件处理，不递归进入目录型符号链接，
+        # 避免符号链接循环（指向自身/父目录）或跨挂载遍历导致扫描无限进行。
+        if os.path.islink(full):
+            try:
+                size = os.path.getsize(full)
+                mtime = os.path.getmtime(full)
+            except OSError:
+                size = 0
+                mtime = None
+            entries.append({
+                "name": name,
+                "is_dir": False,
+                "size": size,
+                "fingerprint": fileFingerprint("local", size, mtime),
+            })
+            continue
         if os.path.isdir(full):
             entries.append({"name": name, "is_dir": True, "size": None})
         else:

@@ -133,6 +133,11 @@ class JobTask:
         self._scanning = False
         self.scannedEntries = 0
         self.previousSourceSnapshot = None
+        # 扫描超时保护：避免来源目录过大/符号链接循环/后端无响应时无限期卡在“扫描中”
+        self.scanStartedAt = None
+        self.scanTimedOut = False
+        self._scan_watchdog = None
+        self.scanTimeout = int(self.job.get('scanTimeout') or 1800)  # 默认 30 分钟
         self.sourceSnapshotIdentity = job_dao.source_snapshot_identity(self.job)
         self.currentTasks = {}
         self.movedFileNames = (
@@ -232,6 +237,15 @@ class JobTask:
             if self.job.get('method') == 2 and self._allOperationsSuccessful():
                 self.finalizeMove()
             self.commitSourceSnapshot()
+            # 扫描阶段被 watchdog 异步超时中止时，统一在此补记超时错误（避免与 sync 线程竞争）
+            if self.scanTimedOut and not self.sourceScanFailed and not any(
+                    item.get('errMsg') and '扫描超时' in str(item.get('errMsg'))
+                    for item in self.finish):
+                self.sourceScanFailed = True
+                self.copyHook(self.normalizeRoot(self.job['srcPath']), None, None, None,
+                              status=7,
+                              errMsg="来源目录扫描超时（已超过 %d 秒），请检查目录规模或是否存在符号链接循环" % self.scanTimeout,
+                              isPath=1)
             if self.finish:
                 job_dao.add_job_task_item_many(self.finish, self._session_factory)
             self.updateTaskStatus()
@@ -380,8 +394,26 @@ class JobTask:
             'createTime': createTime,
         })
 
+    def _scan_timed_out(self):
+        if self.scanStartedAt is None:
+            return False
+        return time.time() - self.scanStartedAt > self.scanTimeout
+
+    def _start_scan_watchdog(self):
+        def _watch():
+            # 守护线程：到达超时阈值且扫描仍未完成时，标记超时并请求中断扫描
+            time.sleep(self.scanTimeout)
+            if not self.scanFinish:
+                self.scanTimedOut = True
+                self.breakFlag = True
+        t = threading.Thread(target=_watch, name="taosync-scan-watchdog", daemon=True)
+        t.start()
+        self._scan_watchdog = t
+
     def sync(self):
         self._scanning = True
+        self.scanStartedAt = time.time()
+        self._start_scan_watchdog()
         try:
             srcPath = self.normalizeRoot(self.job['srcPath'])
             jobExclude = self.job['exclude']
@@ -392,6 +424,8 @@ class JobTask:
             pathsOverlap = getattr(self.alistClient, 'pathsOverlap', virtual_paths_overlap)
             if any(pathsOverlap(srcPath, dstPath) for dstPath in dstPathList):
                 raise ValueError("来源与目录存在重叠，已拒绝执行")
+            if self._scan_timed_out():
+                raise TimeoutError("来源目录扫描超时")
             storedSnapshot = job_dao.get_source_snapshot(
                 self.job['id'], self._session_factory)
             if storedSnapshot['meta']['initialized'] == 1:
@@ -406,6 +440,16 @@ class JobTask:
             else:
                 for index, dstItem in enumerate(dstPathList):
                     self.syncWithHave(srcPath, dstItem, spec, srcPath, dstItem, index == 0)
+            # 同步检查超时：确保 scanTimedOut 在 taskSubmit 读取前已确定，
+            # 不依赖 watchdog 异步线程竞争（watchdog 仅作为阻塞列举的兜底）
+            if self._scan_timed_out():
+                self.scanTimedOut = True
+                self.breakFlag = True
+        except TimeoutError:
+            self.sourceScanFailed = True
+            self.copyHook(srcPath, None, None, None, status=7,
+                          errMsg="来源目录扫描超时（已超过 %d 秒），请检查目录规模或是否存在符号链接循环" % self.scanTimeout,
+                          isPath=1)
         except Exception as e:
             logger.exception(e)
             self.sourceScanFailed = True
@@ -415,7 +459,7 @@ class JobTask:
             self._scanning = False
 
     def scanSourceTree(self, path, spec, rootPath):
-        if self.breakFlag:
+        if self.breakFlag or self._scan_timed_out():
             return False
         try:
             entries = self.listDir(path, True, spec, rootPath)
@@ -618,7 +662,7 @@ class JobTask:
                 self.delFile(dstPath, key, size)
 
     def syncWithHave(self, srcPath, dstPath, spec, srcRootPath, dstRootPath, firstDst):
-        if self.breakFlag:
+        if self.breakFlag or self._scan_timed_out():
             return
         try:
             srcFiles = self.listDir(srcPath, firstDst, spec, srcRootPath)
@@ -649,7 +693,7 @@ class JobTask:
                         self.delFile(dstPath, dstKey, dstFiles[dstKey])
 
     def syncWithOutHave(self, srcPath, dstPath, spec, srcRootPath, dstRootPath, firstDst):
-        if self.breakFlag:
+        if self.breakFlag or self._scan_timed_out():
             return
         status = 2
         errMsg = None
