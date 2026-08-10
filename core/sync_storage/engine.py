@@ -631,7 +631,7 @@ class TaoSyncClient:
 
     def fileSize(self, mount, relative):
         parent, name = normalize_path_like_split(relative)
-        for item in self.getDriver(mount).list(parent or "/"):
+        for item in self.getDriver(mount).list(parent or "/", details=True):
             if item["name"] == name and not item["is_dir"]:
                 return int(item.get("size") or 0)
         raise FileNotFoundError(relative)

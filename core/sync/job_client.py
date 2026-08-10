@@ -313,8 +313,8 @@ class JobTask:
             else:
                 if not matching:
                     self.copyHook(srcPath, None, fileName, entry['size'], status=2, copyType=2)
-                appendMoved_file_safe(
-                    self.job['id'], fileName, srcPath=srcPath,
+                append_moved_file_safe(
+                    self.job['id'], fileName, src_path=srcPath,
                     session_factory=self._session_factory)
                 self.movedFileNames.add(fileName)
 

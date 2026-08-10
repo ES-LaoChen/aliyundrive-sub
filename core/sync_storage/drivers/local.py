@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import shutil
 
+from core.sync_storage.alist_compat import fileFingerprint
 from core.sync_storage.base import (
     TransferCancelled,
     check_cancel,
@@ -25,9 +26,16 @@ def _list_dir(path):
         else:
             try:
                 size = os.path.getsize(full)
+                mtime = os.path.getmtime(full)
             except OSError:
                 size = 0
-            entries.append({"name": name, "is_dir": False, "size": size})
+                mtime = None
+            entries.append({
+                "name": name,
+                "is_dir": False,
+                "size": size,
+                "fingerprint": fileFingerprint("local", size, mtime),
+            })
     return entries
 
 
@@ -101,18 +109,22 @@ class LocalDriver(StorageDriver):
             os.makedirs(parent, exist_ok=True)
         tmp = local + ".taosync.tmp"
         copied = 0
-        with open(source, "rb") if hasattr(source, "read") else open(source, "rb") as fh:
+        src_file = source if hasattr(source, "read") else open(source, "rb")
+        try:
             with open(tmp, "wb") as out:
                 while True:
                     check_cancel(cancel)
-                    chunk = fh.read(1024 * 1024)
+                    chunk = src_file.read(1024 * 1024)
                     if not chunk:
                         break
                     out.write(chunk)
                     copied += len(chunk)
                     if progress is not None and size:
                         progress(copied / size)
-        os.replace(tmp, local)
+            os.replace(tmp, local)
+        finally:
+            if not hasattr(source, "read"):
+                src_file.close()
         if progress is not None:
             progress(1.0)
 
