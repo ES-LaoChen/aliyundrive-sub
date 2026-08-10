@@ -318,6 +318,53 @@ legend { font-size: 13px; font-weight: 700; color: var(--primary-700); padding: 
 
 input[type="range"] { width: 100%; accent-color: var(--primary); }
 
+/* 作业编辑：分组间距（fieldset 之间更清晰） */
+.job-section { margin-bottom: 22px; }
+.job-section > label { margin-bottom: 16px; }
+.job-section > label:last-child { margin-bottom: 0; }
+
+/* 路径字段：标签 + 只读显示 + 选择按钮 */
+.path-field { display: block; margin-bottom: 18px; }
+.path-label { display: block; font-size: 13px; font-weight: 600; color: #374151; margin-bottom: 6px; }
+.path-control { display: flex; align-items: center; gap: 8px; }
+.path-control .path-display {
+  flex: 1; min-width: 0; cursor: default; background: #f8f9fb; color: var(--text);
+}
+.path-control .path-display:focus { border-color: var(--border-strong); box-shadow: none; }
+.path-control .btn { flex: none; }
+.path-tags { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.path-tag {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px 8px 12px; background: var(--primary-50);
+  border: 1px solid var(--primary-150); border-radius: var(--radius-xs);
+  font-size: 13px; color: var(--primary-700); word-break: break-all;
+}
+.path-tag-text { flex: 1; }
+.path-tag-del {
+  flex: none; border: none; background: transparent; cursor: pointer;
+  color: var(--muted); font-size: 16px; line-height: 1; padding: 2px 6px; border-radius: 6px;
+}
+.path-tag-del:hover { background: var(--bad-50); color: var(--bad); }
+
+/* 调度分组 */
+.schedule-group { padding: 14px 16px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: #fff; margin-bottom: 14px; }
+.schedule-group:last-child { margin-bottom: 0; }
+.schedule-group-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.schedule-group-title { font-size: 13px; font-weight: 700; color: var(--ink); }
+.schedule-group-head .cell-sub { margin: 0; }
+.schedule-group > label { margin-bottom: 0; }
+
+/* 网格：Cron 字段 / 过滤参数 */
+.cron-grid, .filter-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 14px 16px;
+}
+.cron-grid label, .filter-grid label { margin-bottom: 0; }
+
+/* 虚拟目录选择器弹窗 */
+.vpath-mount-row { display: flex; align-items: flex-end; gap: 10px; padding: 0 0 12px; }
+.vpath-mount-row label { flex: 1; margin: 0; }
+.vpath-mount-row .btn { flex: none; }
+
 /* =============================================================
    按钮
    ============================================================= */
