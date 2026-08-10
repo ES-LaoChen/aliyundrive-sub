@@ -1,14 +1,14 @@
-"""存储路径身份与重叠检测（移植自 TaoSync service/storage/pathIdentity.py）。"""
-import base64
-import binascii
-import hashlib
-import json
-import ntpath
+"""虚拟路径 / 挂载路径重叠判定（移植自 TaoSync service/storage/pathIdentity.py）。
+
+范围收敛：仅保留 ``local`` 后端的物理路径重叠判定，以及虚拟路径重叠判定。
+外部 AList 引擎的后端语义未知，统一走保守的虚拟路径重叠检查（case 不敏感）。
+"""
+from __future__ import annotations
+
 import os
 import posixpath
-from urllib.parse import urlsplit
 
-from .base import normalize_path
+from core.sync_storage.base import normalize_path
 
 
 def virtual_paths_overlap(first_path, second_path, case_sensitive=True):
@@ -66,115 +66,6 @@ def _local_paths_overlap(first_config, first_relative, second_config, second_rel
     return common == first or common == second
 
 
-def _host(value):
-    return str(value or "").strip().rstrip(".").casefold()
-
-
-def _smb_descriptor(config, relative):
-    server = _host(config.get("host") or config.get("server"))
-    share = str(config.get("share") or "").strip().strip("\\/").casefold()
-    try:
-        port = int(config.get("port") or 445)
-    except (TypeError, ValueError):
-        return None
-    if not server or not share:
-        return None
-    root = str(config.get("root_path") or "").replace("/", "\\").strip("\\")
-    child = normalize_path(relative).strip("/").replace("/", "\\")
-    path = ntpath.normpath(ntpath.join("\\", root, child)).casefold()
-    return ("smb", server, port, share), path
-
-
-def _remote_descriptor(driver_type, config, relative):
-    default_port = 21 if driver_type == "ftp" else 22
-    try:
-        port = int(config.get("port") or default_port)
-    except (TypeError, ValueError):
-        return None
-    host = _host(config.get("host"))
-    username_default = "anonymous" if driver_type == "ftp" else ""
-    username = str(config.get("username") or username_default).strip()
-    if not host or not username:
-        return None
-    root = str(config.get("root_path") or "/").replace("\\", "/")
-    root = "/" + root.strip("/") if root.strip("/") else "/"
-    path = posixpath.normpath(posixpath.join(root, normalize_path(relative).lstrip("/")))
-    return (driver_type, host, port, username), path
-
-
-def _api_identity(value):
-    value = str(value or "https://openapi.alipan.com").strip().rstrip("/")
-    parsed = urlsplit(value)
-    if not parsed.netloc:
-        return value.casefold()
-    scheme = (parsed.scheme or "https").casefold()
-    host = (parsed.hostname or "").casefold()
-    try:
-        port = parsed.port
-    except ValueError:
-        return value.casefold()
-    if port in (80 if scheme == "http" else 443,):
-        port = None
-    authority = host if port is None else "{}:{}".format(host, port)
-    path = posixpath.normpath(parsed.path or "/").rstrip("/")
-    return "{}://{}{}".format(scheme, authority, "" if path == "/" else path)
-
-
-def _jwt_subject(token):
-    try:
-        payload = str(token).split(".")[1]
-        payload += "=" * (-len(payload) % 4)
-        value = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")))
-        subject = value.get("sub")
-        return str(subject) if subject is not None else None
-    except (IndexError, ValueError, TypeError, KeyError, json.JSONDecodeError,
-            binascii.Error, UnicodeDecodeError):
-        return None
-
-
-def _aliyun_account(config):
-    client_id = str(config.get("client_id") or "").strip()
-    refresh_token = str(config.get("refresh_token") or "").strip()
-    subject = _jwt_subject(refresh_token)
-    if client_id and subject:
-        return "subject", client_id, subject
-    if client_id and refresh_token:
-        digest = hashlib.sha256(refresh_token.encode("utf-8")).hexdigest()
-        return "token", client_id, digest
-    return None
-
-
-def _aliyun_same_backend(first, second):
-    if _api_identity(first.get("api_url")) != _api_identity(second.get("api_url")):
-        return False
-    first_drive = str(first.get("drive_id") or "").strip()
-    second_drive = str(second.get("drive_id") or "").strip()
-    if first_drive and second_drive:
-        return first_drive == second_drive
-    first_account = _aliyun_account(first)
-    second_account = _aliyun_account(second)
-    if first_account is None or first_account != second_account:
-        return False
-    return str(first.get("drive_type") or "resource") == str(
-        second.get("drive_type") or "resource"
-    )
-
-
-def _aliyun_paths_overlap(first_config, first_relative, second_config, second_relative):
-    if not _aliyun_same_backend(first_config, second_config):
-        return False
-    first_root = str(first_config.get("root_folder_id") or "root")
-    second_root = str(second_config.get("root_folder_id") or "root")
-    if first_root != second_root:
-        # Folder IDs do not encode ancestry. Once the drive is known to be the
-        # same, treating distinct roots as potentially nested avoids deleting
-        # through a second mount alias.
-        return True
-    first_path = normalize_path(first_relative)
-    second_path = normalize_path(second_relative)
-    return _path_overlaps(first_path, second_path)
-
-
 def mount_paths_overlap(mounts, first_path, second_path):
     """Return whether two TaoSync paths may address overlapping backend data."""
     lookup = _mount_lookup(mounts)
@@ -188,24 +79,8 @@ def mount_paths_overlap(mounts, first_path, second_path):
         return False
     first_config = first_mount.get("config") or {}
     second_config = second_mount.get("config") or {}
-
     if first_type == "local":
         return _local_paths_overlap(
             first_config, first_relative, second_config, second_relative
         )
-    if first_type == "smb":
-        first = _smb_descriptor(first_config, first_relative)
-        second = _smb_descriptor(second_config, second_relative)
-    elif first_type in ("ftp", "sftp"):
-        first = _remote_descriptor(first_type, first_config, first_relative)
-        second = _remote_descriptor(second_type, second_config, second_relative)
-    elif first_type == "aliyun":
-        return _aliyun_paths_overlap(
-            first_config, first_relative, second_config, second_relative
-        )
-    else:
-        return False
-
-    if first is None or second is None or first[0] != second[0]:
-        return False
-    return _path_overlaps(first[1], second[1], separator="\\" if first_type == "smb" else "/")
+    return False

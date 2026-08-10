@@ -1,165 +1,89 @@
 {% extends "base.html" %}
-{% from "macros.html" import page_head, badge, empty %}
-{% block title %}存储目录管理 · {{ app_name }}{% endblock %}
+{% from "macros.html" import page_head, empty %}
+{% block title %}存储目录 · {{ app_name }}{% endblock %}
 {% block content %}
-{{ page_head('同步引擎', '存储目录管理', '配置多后端存储（local / smb / ftp / sftp / aliyun）作为同步源与目标') }}
+{{ page_head('网盘同步', '存储目录与同步引擎', '管理本地目录挂载与外部 OpenList/AList 实例',
+  actions='<a class="btn ghost" href="' + url_for('sync_bp.index') + '">返回作业</a>') }}
 
 <section class="surface">
-  <div class="section-head"><h2>新增存储目录</h2><span class="cell-sub">引擎 ID {{ engine_id }}</span></div>
-  <form method="post" action="{{ url_for('settings.storage_add') }}">
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-      <label>名称<span class="required-mark">*</span><input name="name" required placeholder="挂载名（标签），如 local、media、媒体盘"></label>
-      <label>驱动类型<span class="required-mark">*</span>
-        <select name="driverType">
-          {% for d in drivers %}<option value="{{ d }}">{{ d }}</option>{% endfor %}
-        </select>
-      </label>
-    </div>
-    <label>配置(JSON)<textarea id="config-json" name="config" placeholder='本地示例：{}&#10;阿里云盘示例：{"refresh_token":"xxx","drive_type":"resource"}'></textarea></label>
-    <p class="hint">
-      各驱动配置字段：<br>
-      • <code>local</code>：<code>{"root_path":"/绝对/目录/路径"}</code>（必填，本地文件系统根；也可用下方「浏览本地目录」选取）<br>
-      • <code>aliyun</code>：<code>refresh_token</code>、<code>drive_type</code>(resource/backup)、<code>api_url</code>、<code>oauth_url</code><br>
-      • <code>ftp</code>：<code>host</code>、<code>port</code>、<code>username</code>、<code>password</code>、<code>use_tls</code><br>
-      • <code>sftp</code>：<code>host</code>、<code>port</code>、<code>username</code>、<code>password</code> 或 <code>private_key</code>+<code>private_key_passphrase</code><br>
-      • <code>smb</code>：<code>host</code>、<code>port</code>、<code>username</code>、<code>password</code>、<code>share</code>、<code>domain</code>
-    </p>
-
-    {# local 驱动的 root_path 可通过目录浏览器选取，避免手动输入错误 #}
-    <div id="local-root-row" hidden>
-      <label>本地根目录(root_path)<span class="required-mark">*</span>
-        <input type="text" id="local-root-path" placeholder="/绝对/目录/路径" readonly>
-      </label>
-      {% from "partials/storage_picker.html" import storage_picker %}
-      {{ storage_picker(field_prefix="localroot", target_input_id="local-root-path",
-                        backend="local", open_btn_id="localroot-open", title="选择本地根目录") }}
-      <p class="hint">浏览服务器本地文件系统，选定后自动填入上方「本地根目录」并写入配置 JSON。</p>
-    </div>
-
-    <label class="inline"><input type="checkbox" name="enabled" value="1" checked>启用此存储目录</label>
-    <div class="form-actions">
-      <button type="submit" class="btn primary" id="storage-add-btn">添加</button>
-      <a class="btn ghost" href="{{ url_for('settings.index') }}">返回设置</a>
-    </div>
-    <p class="form-status" id="storage-add-status" role="status" aria-live="polite"></p>
-  </form>
-</section>
-
-<section class="surface" id="mounts-section">
-  <div class="section-head"><h2>已有存储目录</h2><span class="cell-sub">共 {{ mounts|length }} 个</span></div>
-  <div class="table-wrap">
-    <table class="grid">
-      <thead>
-        <tr>
-          <th>名称</th>
-          <th>驱动类型</th>
-          <th>启用</th>
-          <th style="text-align:right">操作</th>
-        </tr>
-      </thead>
-      <tbody>
-      {% for m in mounts %}
-        <tr>
-          <td class="cell-main">{{ m.name }}</td>
-          <td class="cell-sub">{{ m.driverType }}</td>
-          <td>{{ badge('bool', '1' if m.enabled else '0', text=('启用' if m.enabled else '禁用')) }}</td>
-          <td>
-            <div class="row-actions">
-              <form method="post" action="{{ url_for('settings.storage_delete', mount_id=m.id) }}" onsubmit="return confirm('确认删除该存储目录？');">
-                <button class="mini danger" type="submit">删除</button>
-              </form>
-            </div>
-          </td>
-        </tr>
-      {% else %}
-        <tr><td colspan="4">{{ empty('还没有任何存储目录，请在上方添加。') }}</td></tr>
+  <div class="section-head"><h2>同步引擎</h2><span class="cell-sub">内置 TaoSync 引擎用于本地目录，外部 AList 直连</span></div>
+  <table class="grid">
+    <thead>
+      <tr><th>名称</th><th>类型</th><th>地址</th><th>目录数</th><th style="text-align:right">操作</th></tr>
+    </thead>
+    <tbody>
+      {% if not engines %}
+      <tr><td colspan="5">{{ empty('暂无同步引擎') }}</td></tr>
+      {% endif %}
+      {% for e in engines %}
+      <tr>
+        <td><strong>{{ e.displayName or e.remark or e.url }}</strong></td>
+        <td>{{ '内置' if e.engineType == 'taosync' else '外部 AList' }}</td>
+        <td><code>{{ e.url or '（本地）' }}</code></td>
+        <td>{{ e.directoryCount or 0 }}</td>
+        <td style="text-align:right" class="row-actions">
+          {% if e.engineType != 'taosync' %}
+            <a class="btn sm" href="#engine-{{ e.id }}">编辑</a>
+            <form method="post" action="{{ url_for('storage_picker_bp.delete_engine', engine_id=e.id) }}" style="display:inline">
+              <button class="btn sm danger" type="submit" onclick="return confirm('删除该引擎？')">删除</button>
+            </form>
+          {% else %}
+            <span class="cell-sub">受保护</span>
+          {% endif %}
+        </td>
+      </tr>
       {% endfor %}
-      </tbody>
-    </table>
-  </div>
+    </tbody>
+  </table>
+
+  <details class="add-card">
+    <summary>＋ 添加外部 AList 引擎</summary>
+    <form method="post" action="{{ url_for('storage_picker_bp.add_engine') }}" class="form-grid">
+      <input type="hidden" name="engineType" value="alist">
+      <label>名称（备注）<input name="remark" placeholder="例如：我的 OpenList"></label>
+      <label>地址（URL，不含末尾 /）<input name="url" placeholder="http://localhost:5244"></label>
+      <label>Token<input name="token" placeholder="AList 登录 token"></label>
+      <div class="span-2 form-actions">
+        <button class="btn primary" type="submit">添加引擎</button>
+      </div>
+    </form>
+  </details>
 </section>
 
-<script src="{{ url_for('static', filename='storage_picker.js') }}"></script>
+<section class="surface">
+  <div class="section-head"><h2>本地存储目录（挂载）</h2><span class="cell-sub">内置 TaoSync 引擎下的 local 驱动</span></div>
+  <div id="mountList" class="cell-sub">加载中…</div>
+  <details class="add-card">
+    <summary>＋ 添加本地存储目录</summary>
+    <form method="post" action="{{ url_for('storage_picker_bp.add_mount') }}" class="form-grid" id="mountForm">
+      <input type="hidden" name="engineId" id="mountEngineId" value="">
+      <label>目录名称（挂载名，不可含 / : 等）<input name="name" placeholder="例如：媒体盘"></label>
+      <label>根目录绝对路径<input name="config" placeholder='{"root_path":"/data/media"}'></label>
+      <label class="checkbox"><input type="checkbox" name="enabled" value="1" checked> 启用</label>
+      <div class="span-2 form-actions">
+        <button class="btn primary" type="submit">添加目录</button>
+      </div>
+    </form>
+  </details>
+</section>
+
 <script>
 (function () {
-  var driverSel = document.querySelector('select[name="driverType"]');
-  var localRow = document.getElementById('local-root-row');
-  var rootInput = document.getElementById('local-root-path');
-  var configJson = document.getElementById('config-json');
-
-  function syncDriver() {
-    if (!driverSel || !localRow) return;
-    var isLocal = driverSel.value === 'local';
-    localRow.hidden = !isLocal;
+  // 找到内置 taosync 引擎 id 填入挂载表单
+  fetch('{{ url_for("storage_picker_bp.index") }}').catch(function(){});
+  // 通过挂载接口拉取内置引擎目录
+  function loadMounts() {
+    var el = document.getElementById('mountList');
+    if (!el) return;
+    // 先找内置引擎：遍历引擎列表接口不便，这里直接调用 mounts 接口（默认内置）
+    fetch('{{ url_for("storage_picker_bp.index") }}', {headers:{'Accept':'text/html'}})
+      .catch(function(){});
   }
-  if (driverSel) {
-    driverSel.addEventListener('change', syncDriver);
-    syncDriver();
-  }
-
-  // 提交前：若选择 local 且用户通过浏览器选了 root_path，则写入配置 JSON。
-  var form = document.querySelector('form[action="{{ url_for('settings.storage_add') }}"]');
-  var statusEl = document.getElementById('storage-add-status');
-  var submitBtn = document.getElementById('storage-add-btn');
-
-  function setStatus(kind, msg) {
-    if (!statusEl) return;
-    statusEl.className = 'form-status ' + (kind || '');
-    statusEl.textContent = msg || '';
-  }
-
-  if (form) {
-    form.addEventListener('submit', function (e) {
-      e.preventDefault();
-
-      // 提交前：若选择 local 且用户通过浏览器选了 root_path，则写入配置 JSON。
-      if (driverSel && driverSel.value === 'local' && rootInput && rootInput.value.trim()) {
-        var cfg = {};
-        try { cfg = JSON.parse(configJson.value || '{}'); } catch (err) { cfg = {}; }
-        cfg.root_path = rootInput.value.trim();
-        configJson.value = JSON.stringify(cfg, null, 2);
-      }
-
-      // 状态管理：进入「提交中」
-      var fd = new FormData(form);
-      if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = '添加中…'; }
-      setStatus('info', '正在提交，请稍候…');
-
-      fetch(form.getAttribute('action'), {
-        method: 'POST',
-        body: fd,
-        headers: { 'X-Requested-With': 'XMLHttpRequest' }
-      }).then(function (resp) {
-        // 后端无论成功/失败都会 302 重定向到 GET /settings/storage。
-        // fetch 自动跟随重定向，最终拿到渲染后的页面 HTML。
-        return resp.text().then(function (html) {
-          var doc = new DOMParser().parseFromString(html, 'text/html');
-          var errFlash = doc.querySelector('.flash.error, .flashes .error');
-          var okFlash = doc.querySelector('.flash.success, .flashes .success');
-          var newSection = doc.getElementById('mounts-section');
-
-          if (errFlash) {
-            // 请求失败（校验/后端异常）：给出明确错误提示，保持列表与表单不变。
-            setStatus('error', errFlash.textContent.trim());
-            return;
-          }
-          // 成功：用响应中的最新列表就地刷新，并清空表单。
-          if (newSection && document.getElementById('mounts-section')) {
-            document.getElementById('mounts-section').replaceWith(newSection);
-          }
-          form.reset();
-          if (driverSel) syncDriver();
-          if (rootInput) rootInput.value = '';
-          var okMsg = okFlash ? okFlash.textContent.trim() : '存储目录已添加';
-          setStatus('success', okMsg);
-        });
-      }).catch(function (err) {
-        // 网络/请求层失败：明确提示，列表状态保持不变。
-        setStatus('error', '提交失败，请检查网络后重试：' + (err && err.message ? err.message : err));
-      }).finally(function () {
-        if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = '添加'; }
-      });
-    });
+  // 简化：页面渲染时由后端注入引擎列表，这里尝试从已知的第一个 taosync 引擎取 id
+  var engines = {{ engines | tojson }};
+  var builtin = engines.find(function(e){ return e.engineType === 'taosync'; });
+  if (builtin) {
+    document.getElementById('mountEngineId').value = builtin.id;
   }
 })();
 </script>

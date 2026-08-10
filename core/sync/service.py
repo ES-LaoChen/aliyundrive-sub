@@ -1,154 +1,158 @@
-"""同步管理服务类（SyncService）：封装作业编排层，接入 Flask 服务容器。
+"""同步服务聚合（对应 TaoSync controller 层 + 本项目 Services 容器接入点）。
 
-把 ``core.sync.job_service`` 的模块级函数按「持有会话工厂 + 通知器」的方式
-包装成有状态服务，便于蓝图直接取用。模块级函数保留作为无状态入口，
-供测试或后台调度调用；``SyncService`` 仅做依赖注入与边界封装。
+``SyncService`` 把同步引擎 / 存储目录 / 作业 / 任务 / 记录各子模块组合起来，
+向上对蓝图暴露统一 API；向下注入 ``session_factory`` 和 ``notifier``
+（复用当前 Telegram 通知）。调度由每个 ``JobClient`` 自带的 BackgroundScheduler
+驱动（与 TG 监控线程同模式，不依赖外部调度器）。
 """
 from __future__ import annotations
 
 import logging
 
-from core.sync import job_service
+from core.sync import job_dao, job_service, task_service
+from core.sync_storage.engine import (
+    AlistClient,
+    StorageMountDAO,
+    StorageService,
+    SyncEngineDAO,
+)
 
 logger = logging.getLogger(__name__)
 
 
 class SyncService:
-    """同步管理服务：持有 session_factory 与上层 services（用于通知）。"""
+    def __init__(self, session_factory, notifier=None):
+        self._sf = session_factory
+        self._notifier = notifier
+        self._engine_dao = SyncEngineDAO(session_factory)
+        self._mount_dao = StorageMountDAO(session_factory)
+        self._storage_service = None  # 懒加载（依赖 job_dao 等，避免循环）
 
-    def __init__(self, session_factory, services=None):
-        self.session_factory = session_factory
-        self.services = services
+    # ───────────────── 同步引擎（alist 表） ─────────────────
+    def get_engine_list(self):
+        clients = self._engine_dao.get_engine_list()
+        for client in clients:
+            client.pop('token', None)
+            if client.get('engineType') == 'taosync':
+                client['displayName'] = 'TaoSync（内置）'
+                client['directoryCount'] = len(self._mount_dao.get_mount_list(client['id']))
+            else:
+                client['displayName'] = client.get('remark') or client.get('url')
+        return clients
 
-    # ---- 启动 ----
-    def init_jobs(self) -> None:
-        """启动时修正异常任务状态并重建启用作业的调度。"""
-        with self.session_factory() as session:
-            job_service.init_jobs(session, self.services)
+    def add_engine(self, engine):
+        # 外部 AList：先验证连通性（会抛异常）。
+        if engine.get('engineType') != 'taosync':
+            url = engine.get('url', '')
+            if url.endswith('/'):
+                url = url[:-1]
+            client = AlistClient(url, engine.get('token') or '')
+            engine_id = self._engine_dao.add_engine({
+                'remark': engine.get('remark'),
+                'url': url,
+                'userName': client.user,
+                'token': engine.get('token'),
+                'engineType': 'alist',
+                'systemKey': 'alist',
+                'protected': 0,
+            })
+            client.updateAlistId(engine_id)
+        else:
+            engine_id = self._engine_dao.add_engine({
+                'remark': engine.get('remark'),
+                'url': '',
+                'userName': 'TaoSync',
+                'token': '',
+                'engineType': 'taosync',
+                'systemKey': 'taosync',
+                'protected': 0,
+            })
+        return engine_id
 
-    # ---- 作业 CRUD 编排 ----
-    def add_job(self, job: dict):
-        with self.session_factory() as session:
-            result = job_service.add_job_client(job, session, services=self.services)
-            session.commit()
-            return result
+    def update_engine(self, engine):
+        self._engine_dao.update_engine(engine)
 
-    def edit_job(self, job: dict):
-        with self.session_factory() as session:
-            result = job_service.edit_job_client(job, session, services=self.services)
-            session.commit()
-            return result
+    def remove_engine(self, engine_id):
+        self._engine_dao.remove_engine(engine_id)
 
-    def remove_job(self, job_id: int):
-        with self.session_factory() as session:
-            job_service.remove_job_client(job_id, session)
-            session.commit()
+    # ───────────────── 存储目录（storage_mount） ─────────────────
+    def _storage(self):
+        if self._storage_service is None:
+            self._storage_service = StorageService(self._sf)
+        return self._storage_service
 
-    # ---- 手动触发 / 启停 ----
-    def do_job_manual(self, job_id: int, operator="手动"):
-        # 仅用于取 / 建 JobClient（缓存命中时只读 identity map）；实际执行在
-        # JobClient.do_manual 启动的后台线程内自行开 session 并 commit，不在此长事务中。
-        with self.session_factory() as session:
-            job_service.do_job_manual(job_id, session, services=self.services, operator=operator)
-
-    def abort_job(self, job_id: int):
-        with self.session_factory() as session:
-            job_service.abort_job(job_id, session, services=self.services)
-            session.commit()
-
-    def pause_job(self, job_id: int):
-        with self.session_factory() as session:
-            job_service.pause_job(job_id, session, services=self.services)
-            session.commit()
-
-    def continue_job(self, job_id: int):
-        with self.session_factory() as session:
-            job_service.continue_job(job_id, session, services=self.services)
-            session.commit()
-
-    def do_all_manual(self):
-        with self.session_factory() as session:
-            job_service.do_all_job_manual(session, services=self.services)
-
-    def pause_all(self):
-        with self.session_factory() as session:
-            job_service.pause_all_job(session)
-            session.commit()
-
-    def continue_all(self):
-        with self.session_factory() as session:
-            job_service.continue_all_job(session)
-            session.commit()
-
-    # ---- 查询 ----
-    def get_job_list_view(self, req=None):
-        with self.session_factory() as session:
-            return job_service.get_job_list_view(session, req)
-
-    def get_job_current(self, job_id: int, status=None):
-        with self.session_factory() as session:
-            return job_service.get_job_current(job_id, session, status, self.services)
-
-    def get_job_progress(self, job_id: int):
-        with self.session_factory() as session:
-            return job_service.get_job_progress(job_id, session, self.services)
-
-    # ---- 同步记录（历史日志）编排 ----
-    def add_sync_record(self, record: dict) -> int:
-        with self.session_factory() as session:
-            from core.sync.job_dao import add_sync_record as _add
-            rid = _add(session, record)
-            session.commit()
-            return rid
-
-    def get_sync_record_list(self, params: dict) -> dict:
-        with self.session_factory() as session:
-            from core.sync.job_dao import get_sync_record_list as _list
-            return _list(session, params)
-
-    def get_all_sync_records(self, params: dict = None) -> list:
-        with self.session_factory() as session:
-            from core.sync.job_dao import get_all_sync_records as _all
-            return _all(session, params)
-
-    # ---- 存储目录（挂载）编排：委托 storage_engine ----
-    def get_system_engine_id(self):
-        from core.sync import engine as storage_engine
-
-        with self.session_factory() as session:
-            return storage_engine.get_system_engine_id(session)
-
-    def get_mount_list(self):
-        from core.sync import engine as storage_engine
-
-        with self.session_factory() as session:
-            engine_id = storage_engine.get_system_engine_id(session)
-            return storage_engine.get_mount_list(session, engine_id)
-
-    def add_mount(self, data: dict):
-        from core.sync import engine as storage_engine
-
-        with self.session_factory() as session:
-            result = storage_engine.add_mount(session, data)
-            session.commit()
-            return result
-
-    def update_mount(self, mount_id: int, data: dict):
-        from core.sync import engine as storage_engine
-
-        with self.session_factory() as session:
-            result = storage_engine.update_mount(session, mount_id, data)
-            session.commit()
-            return result
-
-    def remove_mount(self, mount_id: int):
-        from core.sync import engine as storage_engine
-
-        with self.session_factory() as session:
-            storage_engine.remove_mount(session, mount_id)
-            session.commit()
+    def get_mount_list(self, engine_id):
+        return self._storage().get_mount_list(engine_id)
 
     def get_supported_drivers(self):
-        from core.sync import engine as storage_engine
+        return self._storage().get_supported_drivers()
 
-        return storage_engine.get_supported_drivers()
+    def add_mount(self, data):
+        return self._storage().add_mount(data)
+
+    def update_mount(self, data):
+        self._storage().update_mount(data)
+
+    def remove_mount(self, mount_id):
+        self._storage().remove_mount(mount_id)
+
+    # ───────────────── 作业 job ─────────────────
+    def init_jobs(self):
+        job_service.init_jobs(self._sf, self._notifier)
+
+    def get_job_list(self, req=None):
+        return job_service.get_job_list_view(req or {}, self._sf)
+
+    def get_job_by_id(self, job_id):
+        return job_dao.get_job_by_id(job_id, self._sf)
+
+    def add_job(self, job):
+        return job_service.add_job_client(job, False, self._sf, self._notifier)
+
+    def update_job(self, job):
+        job_service.edit_job_client(job, self._sf, self._notifier)
+
+    def remove_job(self, job_id):
+        job_service.remove_job_client(job_id, self._sf, self._notifier)
+
+    def do_job_manual(self, job_id):
+        job_service.do_job_manual(job_id, self._sf, self._notifier)
+
+    def do_all_job_manual(self):
+        job_service.do_all_job_manual(self._sf, self._notifier)
+
+    def pause_job(self, job_id):
+        job_service.pause_job(job_id, self._sf, self._notifier)
+
+    def continue_job(self, job_id):
+        job_service.continue_job(job_id, self._sf, self._notifier)
+
+    def pause_all_job(self):
+        job_service.pause_all_job(self._sf, self._notifier)
+
+    def continue_all_job(self):
+        job_service.continue_all_job(self._sf, self._notifier)
+
+    def abort_job(self, job_id):
+        job_service.abort_job(job_id, self._sf, self._notifier)
+
+    def get_job_current(self, job_id, status=None):
+        return job_service.get_job_current(job_id, status, self._sf, self._notifier)
+
+    def validate_mounts_exist(self):
+        return job_service.validate_mounts_exist(self._sf)
+
+    # ───────────────── 任务 task ─────────────────
+    def get_task_list(self, req):
+        return task_service.get_task_list(req, self._sf)
+
+    def get_task_item_list(self, req):
+        return task_service.get_task_item_list(req, self._sf)
+
+    def remove_task(self, task_id):
+        task_service.remove_task(task_id, self._sf)
+
+    # ───────────────── 运行记录 sync_records ─────────────────
+    def get_record_list(self, job_id=None, page_size=None, page_num=None):
+        return job_dao.get_sync_record_list(
+            job_id, page_size=page_size, page_num=page_num, session_factory=self._sf)

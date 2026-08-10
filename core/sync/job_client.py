@@ -1,15 +1,17 @@
-"""同步任务引擎核心：JobClient / JobTask / CopyItem。
+"""同步作业客户端（移植自 TaoSync service/syncJob/jobClient.py）。
 
-移植自 TaoSync ``service/syncJob/jobClient.py``，仅保留「移动模式」(method=2) 分支，
-调度支持 interval / cron / 手动。持久化改为 SQLAlchemy（``core.sync.job_dao``）。
+保持原核心逻辑：调度（interval/cron/manual）、增量 source-mode 快照同步、
+move 模式、冲突处理、排除规则（pathspec）、文件大小过滤、单文件进度、并行提交。
 
-``commonUtils`` 的 ``convertSeconds`` / ``convertBytes`` 内联为轻量函数；
-``common.LNG.G`` 中文文案直接以常量替换（本项目不引入 i18n）。
+适配差异：
+- ``engineService.getClientById`` → ``core.sync_storage.engine.get_client_by_id``。
+- 文案 ``common.LNG.G(...)`` → 中文字面量。
+- 通知经 ``SyncService`` 传入的 ``notifier``；``taskService.updateJobTaskStatus``
+  已封装通知调用。
 """
 from __future__ import annotations
 
 import itertools
-import json
 import logging
 import posixpath
 import threading
@@ -20,1232 +22,801 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from pathspec import PathSpec
 from pathspec.patterns.gitwildmatch import GitWildMatchPattern
 
-from core.sync import engine as storage_engine
-from core.sync.job_dao import (
-    add_job_task,
-    append_moved_file,
-    clear_source_snapshot,
-    get_job_by_id,
-    get_source_snapshot,
-    load_moved_file_names,
-    replace_source_snapshot,
-    source_snapshot_identity,
-    update_job_task_status,
-)
+from core.sync import job_dao
+from core.sync.job_client_helpers import is_file_size_allowed, virtual_paths_overlap
+from core.sync.move_log import append_moved_file, load_moved_file_names
+from core.sync_storage.engine import get_client_by_id
 
 logger = logging.getLogger(__name__)
 
 
-# 轻量单位换算（替代 commonUtils）。
-def convert_seconds(seconds):
-    seconds = int(seconds or 0)
-    hours = seconds // 3600
-    remaining = seconds % 3600
-    minutes = remaining // 60
-    secs = remaining % 60
-    return hours, minutes, secs
-
-
-def convert_bytes(val):
-    val = int(val or 0)
-    unit_list = ["B", "KB", "MB", "GB", "TB"]
-    i = 0
-    while i < len(unit_list) - 1 and val >= 1024 ** (i + 1):
-        i += 1
-    return f"{val / (1024 ** i):.2f} {unit_list[i]}"
-
-
-# 中文文案常量（替代 common.LNG.G）。
-class G:
-    source_target_overlap = "源路径与目标路径存在重叠，无法同步"
-    source_mode_invalid = "sourceMode 取值无效"
-    file_size_invalid = "文件大小必须为非负整数"
-    file_size_range_invalid = "最小文件大小不能大于最大文件大小"
-    move_delivery_incomplete = "目标未全部送达，跳过源删除"
-    source_changed_during_move = "源文件在移动期间发生变化，跳过删除"
-    source_version_unavailable = "源文件版本指纹缺失，跳过删除"
-    copy_success_but_delete_fail = "复制成功但删除源文件失败：{}"
-    move_skipped_logged = "文件已记录为已移动，跳过：{fileName}（源：{srcPath}）"
-    move_already_logged = "已记录为已移动，跳过"
-    scan_error = "扫描{}目录出错：{}"
-    src = "源"
-    dst = "目标"
-    del_job_course_error = "添加任务过程中报错：{}"
-    interval_lost = "interval 调度间隔缺失"
-    cron_lost = "cron 调度字段缺失"
-    do_job_err = "执行作业出错：{}"
-    cannot_resume_lost_job = "无法恢复未调度的作业"
-    stop_fail = "停止作业失败：{}"
-    disable_fail = "禁用作业失败：{}"
-    job_running = "作业正在运行中"
-    disabled_job_cannot_run = "已禁用的作业不能运行"
-    cannot_disable_manual_job = "手动作业不能禁用"
-    no_job_for_run = "没有可手动运行的作业"
-    disable_then_edit = "请先禁用作业再编辑"
-    job_changed_during_sync = "同步期间作业配置发生变化"
-    job_not_found = "作业不存在"
-
-
-def is_file_size_allowed(file_size, min_file_size=None, max_file_size=None):
-    if min_file_size is not None and file_size < min_file_size:
-        return False
-    if max_file_size is not None and file_size > max_file_size:
-        return False
-    return True
-
-
-def normalize_virtual_path(path):
-    value = str(path).replace("\\", "/")
-    return posixpath.normpath("/" + value.lstrip("/")).casefold()
-
-
-def virtual_paths_overlap(first_path, second_path):
-    first = normalize_virtual_path(first_path)
-    second = normalize_virtual_path(second_path)
-    return (first == second
-            or first.startswith(second.rstrip("/") + "/")
-            or second.startswith(first.rstrip("/") + "/"))
-
-
 class CopyItem:
-    def __init__(self, src_path, dst_path, file_name, file_size, method, job_task):
-        self.job_task = job_task
-        self.alist_client = self.job_task.alist_client
-        self.task_id = self.job_task.task_id
-        self.src_path = src_path
-        self.dst_path = dst_path
-        self.file_name = file_name
-        self.file_size = file_size
-        self.copy_type = 0 if method < 2 else 2
-        self.alist_task_id = None
+    def __init__(self, srcPath, dstPath, fileName, fileSize, method, jobTask):
+        self.jobTask = jobTask
+        self.alistClient = self.jobTask.alistClient
+        self.taskId = self.jobTask.taskId
+        self.srcPath = srcPath
+        self.dstPath = dstPath
+        self.fileName = fileName
+        self.fileSize = fileSize
+        self.copyType = 0 if method < 2 else 2
+        self.alistTaskId = None
         self.status = 0
         self.progress = 0.0
-        # 速度/剩余时间近似推算所需字段：
-        #  - start_time：开始传输时刻（Unix 秒，浮点）
-        #  - last_sample：上次采样 (时间, 已传字节)，用于算瞬时速度
-        self.start_time = None
-        self.last_sample = None
-        self.speed = 0
-        self.err_msg = None
-        self.create_time = int(time.time())
-        self.doing_key = None
+        self.errMsg = None
+        self.createTime = int(time.time())
+        self.doingKey = None
 
-    def do_by_thread(self):
-        do_thread = threading.Thread(target=self.do_it, name="copy-item-" + str(self.task_id), daemon=True)
-        do_thread.start()
+    def doByThread(self):
+        doThread = threading.Thread(target=self.doIt)
+        doThread.start()
 
-    def _sample_speed(self):
-        """基于 progress%(×file_size) 的采样差估算瞬时速度（字节/秒）。"""
-        now = time.time()
-        transferred = (self.progress or 0) / 100.0 * (self.file_size or 0)
-        if self.start_time is None:
-            self.start_time = now
-            self.last_sample = (now, transferred)
-            return
-        if self.last_sample is None:
-            self.last_sample = (now, transferred)
-            return
-        prev_t, prev_bytes = self.last_sample
-        dt = now - prev_t
-        if dt <= 0:
-            return
-        self.speed = int(max(0, (transferred - prev_bytes) / dt))
-        self.last_sample = (now, transferred)
-
-    def do_it(self):
-        self.start_time = time.time()
-        self.last_sample = (self.start_time, 0)
+    def doIt(self):
         try:
-            if self.job_task.break_flag:
+            if self.jobTask.breakFlag:
                 self.status = 4
             else:
-                self.alist_task_id = self.alist_client.copy_file(
-                    self.src_path, self.dst_path, self.file_name
-                )
+                self.alistTaskId = self.alistClient.copyFile(
+                    self.srcPath, self.dstPath, self.fileName)
         except Exception as e:
-            self.err_msg = str(e)
+            self.errMsg = str(e)
             self.status = 7
         else:
-            if self.alist_task_id is None:
+            if self.alistTaskId is None:
                 self.status = 2
             elif self.status != 4:
-                self.check_and_get_status()
-        self.end_it()
+                self.checkAndGetStatus()
+        self.endIt()
 
-    def check_and_get_status(self):
+    def checkAndGetStatus(self):
         while True:
-            if self.job_task.break_flag:
+            if self.jobTask.breakFlag:
                 self.status = 4
-                if self.alist_task_id is not None:
+                if self.alistTaskId is not None:
                     try:
-                        self.alist_client.copy_task_cancel(self.alist_task_id)
-                        self.alist_client.copy_task_delete(self.alist_task_id)
+                        self.alistClient.copyTaskCancel(self.alistTaskId)
+                        self.alistClient.copyTaskDelete(self.alistTaskId)
                     except Exception:
                         self.status = 7
-                        self.err_msg = "取消复制任务失败"
                 break
-            cu_time = time.time()
-            time.sleep(0.61 if cu_time - self.job_task.last_watching < 3 else 2.93)
+            cuTime = time.time()
+            time.sleep(0.61 if cuTime - self.jobTask.lastWatching < 3 else 2.93)
             try:
-                task_info = self.alist_client.task_info(self.alist_task_id)
+                taskInfo = self.alistClient.taskInfo(self.alistTaskId)
             except Exception as e:
                 logger.exception(e)
-                e_msg = str(e)
-                if "404" in e_msg:
-                    e_msg = "任务可能已被删除"
-                task_info = {"state": 7, "progress": None, "error": e_msg}
-            if task_info["state"] == self.status and task_info["progress"] == self.progress:
+                eMsg = str(e)
+                if '404' in eMsg:
+                    eMsg = "任务可能已被删除"
+                taskInfo = {'state': 7, 'progress': None, 'error': eMsg}
+            if taskInfo['state'] == self.status and taskInfo['progress'] == self.progress:
                 continue
-            self.status = task_info["state"]
-            self.progress = task_info["progress"]
-            self.err_msg = task_info["error"] if task_info["error"] else None
-            self._sample_speed()
-            self.job_task.record_progress(self)
-            if task_info["state"] in (2, 4, 7):
+            self.status = taskInfo['state']
+            self.progress = taskInfo['progress']
+            self.errMsg = taskInfo['error'] if taskInfo['error'] else None
+            if taskInfo['state'] in [2, 4, 7]:
                 try:
-                    self.alist_client.copy_task_delete(self.alist_task_id)
+                    self.alistClient.copyTaskDelete(self.alistTaskId)
+                    break
                 except Exception:
-                    pass
-                break
+                    break
 
-    def end_it(self):
-        self.job_task.copy_hook(
-            self.src_path, self.dst_path, self.file_name, self.file_size,
-            self.alist_task_id, self.status, err_msg=self.err_msg,
-            copy_type=self.copy_type, create_time=self.create_time,
+    def endIt(self):
+        self.jobTask.copyHook(
+            self.srcPath, self.dstPath, self.fileName, self.fileSize,
+            self.alistTaskId, self.status, errMsg=self.errMsg, copyType=self.copyType,
+            createTime=self.createTime,
         )
-        del self.job_task.doing[self.doing_key]
+        del self.jobTask.doing[self.doingKey]
 
 
 class JobTask:
-    def __init__(self, task_id, vm):
-        self.task_id = task_id
-        self.job_client = vm
-        self.job = self.job_client.job
-        self.alist_client = storage_engine.get_storage_client(vm.session, self.job.engineId)
-        self.create_time = time.time()
+    def __init__(self, taskId, vm, notifier=None, session_factory=None):
+        self.taskId = taskId
+        self.jobClient = vm
+        self.job = self.jobClient.job
+        self.alistClient = get_client_by_id(self.job['alistId'], session_factory)
+        self._notifier = notifier
+        self._session_factory = session_factory
+        self.createTime = time.time()
         self.finish = []
         self.doing = {}
         self.waiting = []
-        self.last_watching = 0.0
-        self.queue_num = 0
-        self.scan_finish = False
-        self.first_sync = None
-        self.break_flag = False
-        self.source_snapshot = {}
-        self.source_scan_attempted = False
-        self.source_scan_failed = False
-        self.previous_source_snapshot = None
-        self.source_snapshot_identity = source_snapshot_identity(self.job)
-        self.current_tasks = {}
-        self.moved_file_names = (
-            load_moved_file_names(vm.session, self.job.id)
-            if self.job.method == 2 else set()
+        self.lastWatching = 0.0
+        self.queueNum = 0
+        self.scanFinish = False
+        self.firstSync = None
+        self.breakFlag = False
+        self.sourceSnapshot = {}
+        self.sourceScanAttempted = False
+        self.sourceScanFailed = False
+        self.previousSourceSnapshot = None
+        self.sourceSnapshotIdentity = job_dao.source_snapshot_identity(self.job)
+        self.currentTasks = {}
+        self.movedFileNames = (
+            load_moved_file_names(self.job['id'], session_factory)
+            if self.job.get('method') == 2 else set()
         )
-        # 进度缓冲：record_progress 写入内存 buffer，由 _flush_progress 节流落盘，
-        # 避免大规模文件同步时每文件一次 DB 写导致 IO / 界面卡顿。
-        self._progress_buffer = {}
-        self._progress_flush_at = 0.0
-        self._progress_flush_interval = 1.0  # 秒：节流落盘间隔
-        self._progress_flush_max = 200       # 条：buffer 上限，达此即强制 flush
-        self.sync_thread = threading.Thread(target=self.sync, name="job-sync-" + str(task_id), daemon=True)
-        self.submit_thread = threading.Thread(target=self.task_submit, name="job-submit-" + str(task_id), daemon=True)
-
-    # ---------- 实时进度（持久化中间表） ----------
-    def record_progress(self, copy_item) -> None:
-        """记录/更新单个文件的实时进度到内存 buffer（节流落盘）。
-
-        copy_item 提供 fileName/src_path/dst_path/file_size/status/progress/speed。
-        进度状态映射：0-待 1-传输中 2-成功 4-中止 7-失败。
-        """
-        from core.sync.job_dao import (
-            PROGRESS_STATUS_ABORTED,
-            PROGRESS_STATUS_FAILED,
-            PROGRESS_STATUS_RUNNING,
-            PROGRESS_STATUS_SUCCESS,
-        )
-
-        status_map = {0: 0, 1: 1, 2: 2, 3: 1, 4: 4, 7: 7}
-        mapped = status_map.get(int(copy_item.status), 1)
-        now = int(time.time())
-        key = (copy_item.file_name, copy_item.src_path)
-        prev = self._progress_buffer.get(key)
-        item = {
-            "fileName": copy_item.file_name,
-            "srcPath": copy_item.src_path,
-            "dstPath": copy_item.dst_path,
-            "fileSize": copy_item.file_size,
-            "status": mapped,
-            "progress": int(copy_item.progress or 0),
-            "speed": int(getattr(copy_item, "speed", 0) or 0),
-            "transferred": int((copy_item.progress or 0) / 100.0 * (copy_item.file_size or 0)),
-            "startedAt": prev.get("startedAt") if prev else now,
-            "finishedAt": now if mapped in (PROGRESS_STATUS_SUCCESS, PROGRESS_STATUS_FAILED, PROGRESS_STATUS_ABORTED) else 0,
-            "errMsg": copy_item.err_msg or "",
-        }
-        self._progress_buffer[key] = item
-
-        now_f = time.time()
-        if (now_f - self._progress_flush_at >= self._progress_flush_interval
-                or len(self._progress_buffer) >= self._progress_flush_max):
-            self._flush_progress()
-
-    def _flush_progress(self) -> None:
-        """把内存 buffer 批量 upsert 到 sync_progress（节流写入）。"""
-        if not self._progress_buffer:
-            return
-        try:
-            from core.sync.job_dao import bulk_upsert_progress
-
-            session = self.job_client.session
-            bulk_upsert_progress(
-                session, self.task_id, self.job.id,
-                list(self._progress_buffer.values()),
-            )
-            session.commit()
-            self._progress_buffer.clear()
-            self._progress_flush_at = time.time()
-        except Exception:
-            logger.exception("刷新同步进度失败（忽略，下个周期重试）")
-
-    def _record_progress_simple(self, name, src_path, dst_path, size, status, err_msg) -> None:
-        """记录非 CopyItem 来源的文件级进度（目录标记 / 扫描错误 / 移动删除失败）。"""
-        from core.sync.job_dao import (
-            PROGRESS_STATUS_ABORTED,
-            PROGRESS_STATUS_FAILED,
-            PROGRESS_STATUS_RUNNING,
-            PROGRESS_STATUS_SUCCESS,
-        )
-
-        status_map = {0: 0, 1: 1, 2: 2, 3: 1, 4: 4, 7: 7}
-        mapped = status_map.get(int(status), 1)
-        now = int(time.time())
-        key = (name, src_path)
-        prev = self._progress_buffer.get(key)
-        item = {
-            "fileName": name,
-            "srcPath": src_path,
-            "dstPath": dst_path or "",
-            "fileSize": size,
-            "status": mapped,
-            "progress": 100 if mapped == PROGRESS_STATUS_SUCCESS else 0,
-            "speed": 0,
-            "transferred": size if mapped == PROGRESS_STATUS_SUCCESS else 0,
-            "startedAt": prev.get("startedAt") if prev else now,
-            "finishedAt": now if mapped in (PROGRESS_STATUS_SUCCESS, PROGRESS_STATUS_FAILED, PROGRESS_STATUS_ABORTED) else 0,
-            "errMsg": err_msg or "",
-        }
-        self._progress_buffer[key] = item
-        now_f = time.time()
-        if (now_f - self._progress_flush_at >= self._progress_flush_interval
-                or len(self._progress_buffer) >= self._progress_flush_max):
-            self._flush_progress()
-
-    def _record_pending(self) -> None:
-        """扫描完成后：对尚未进入 doing/waiting/finish 的文件，标记为待处理。
-
-        用于「总数」估算——扫描发现但还在排队未开始传输的文件计入 pending。
-        """
-        now = int(time.time())
-        for ci in self.waiting:
-            key = (ci.file_name, ci.src_path)
-            if key not in self._progress_buffer:
-                self._progress_buffer[key] = {
-                    "fileName": ci.file_name,
-                    "srcPath": ci.src_path,
-                    "dstPath": ci.dst_path,
-                    "fileSize": ci.file_size,
-                    "status": 0,
-                    "progress": 0,
-                    "speed": 0,
-                    "transferred": 0,
-                    "startedAt": now,
-                    "finishedAt": 0,
-                    "errMsg": "",
-                }
-        self._flush_progress()
+        self.syncThread = threading.Thread(target=self.sync)
+        self.submitThread = threading.Thread(target=self.taskSubmit)
 
     def start(self):
-        self.sync_thread.start()
-        self.submit_thread.start()
+        self.syncThread.start()
+        self.submitThread.start()
 
-    def get_current(self):
-        self.last_watching = time.time()
+    def getCurrent(self):
+        self.lastWatching = time.time()
         waits = [{
-            "srcPath": w.src_path, "dstPath": w.dst_path, "isPath": 0,
-            "fileName": w.file_name, "fileSize": w.file_size, "status": w.status,
-            "type": w.copy_type, "progress": w.progress, "errMsg": w.err_msg,
-            "createTime": w.create_time,
+            'srcPath': w.srcPath, 'dstPath': w.dstPath, 'isPath': 0,
+            'fileName': w.fileName, 'fileSize': w.fileSize, 'status': w.status,
+            'type': w.copyType, 'progress': w.progress, 'errMsg': w.errMsg,
+            'createTime': w.createTime,
         } for w in self.waiting]
         dos = [{
-            "srcPath": d.src_path, "dstPath": d.dst_path, "isPath": 0,
-            "fileName": d.file_name, "fileSize": d.file_size, "status": d.status,
-            "type": d.copy_type, "progress": d.progress, "errMsg": d.err_msg,
-            "createTime": d.create_time,
+            'srcPath': d.srcPath, 'dstPath': d.dstPath, 'isPath': 0,
+            'fileName': d.fileName, 'fileSize': d.fileSize, 'status': d.status,
+            'type': d.copyType, 'progress': d.progress, 'errMsg': d.errMsg,
+            'createTime': d.createTime,
         } for d in self.doing.values()]
-        all_task = list(itertools.chain(waits, dos, self.finish))
-        key_val_space = {
-            "wait": 0, "running": 1, "success": 2, "fail": 7, "other": -1,
+        allTask = list(itertools.chain(waits, dos, self.finish))
+        keyValSpace = {
+            'wait': 0, 'running': 1, 'success': 2, 'fail': 7, 'other': -1,
         }
-        current_tasks = {}
-        for val in key_val_space.values():
-            current_tasks[val] = []
+        currentTasks = {}
+        for val in keyValSpace.values():
+            currentTasks[val] = []
         otk = []
-        otk_status = [3, 4, 5, 6, 8, 9]
+        otkStatus = [3, 4, 5, 6, 8, 9]
         grouped = defaultdict(list)
-        for task_item in all_task:
-            grouped[task_item["status"]].append(task_item)
+        for taskItem in allTask:
+            grouped[taskItem['status']].append(taskItem)
         for status, tasks in grouped.items():
-            tasks.sort(key=lambda x: x["createTime"])
-            if status in otk_status:
+            tasks.sort(key=lambda x: x['createTime'])
+            if status in otkStatus:
                 otk.extend(tasks)
             else:
-                current_tasks[status] = tasks
-        current_tasks[-1] = otk
-        self.current_tasks = current_tasks
+                currentTasks[status] = tasks
+        currentTasks[-1] = otk
+        self.currentTasks = currentTasks
         result = {
-            "scanFinish": self.scan_finish,
-            "doingTask": current_tasks[1],
-            "createTime": int(self.create_time),
-            "duration": int(self.last_watching - self.create_time),
-            "firstSync": int(self.first_sync) if self.first_sync is not None else None,
-            "num": {},
-            "size": {},
+            'scanFinish': self.scanFinish,
+            'doingTask': currentTasks[1],
+            'createTime': int(self.createTime),
+            'duration': int(self.lastWatching - self.createTime),
+            'firstSync': int(self.firstSync) if self.firstSync is not None else None,
+            'num': {}, 'size': {},
         }
-        for key, val in key_val_space.items():
-            result["num"][key] = len(current_tasks[val])
-            result["size"][key] = sum(
-                item["fileSize"] for item in current_tasks[val]
-                if item["fileSize"] is not None and item["type"] != 1
-            )
+        for key, val in keyValSpace.items():
+            result['num'][key] = len(currentTasks[val])
+            result['size'][key] = sum(
+                item['fileSize'] for item in currentTasks[val]
+                if item['fileSize'] is not None and item['type'] != 1)
         return result
 
-    def get_current_by_status(self, status):
-        return self.current_tasks[status]
+    def getCurrentByStatus(self, status):
+        return self.currentTasks[status]
 
-    def task_submit(self):
+    def taskSubmit(self):
         while True:
-            if self.break_flag:
+            if self.breakFlag:
                 break
             time.sleep(0.5)
-            doing_nums = len(self.doing.keys())
-            waiting_nums = len(self.waiting)
-            if not self.scan_finish or doing_nums != 0 or waiting_nums != 0:
-                while doing_nums < 20:
-                    if self.break_flag:
+            doingNums = len(self.doing.keys())
+            waitingNums = len(self.waiting)
+            if not self.scanFinish or doingNums != 0 or waitingNums != 0:
+                while doingNums < 20:
+                    if self.breakFlag:
                         break
-                    if waiting_nums == 0:
+                    if waitingNums == 0:
                         break
-                    if self.first_sync is None:
-                        self.first_sync = time.time()
-                    self.queue_num += 1
-                    self.doing[self.queue_num] = self.waiting.pop(0)
-                    self.doing[self.queue_num].doing_key = self.queue_num
-                    self.doing[self.queue_num].do_by_thread()
-                    doing_nums = len(self.doing.keys())
-                    waiting_nums = len(self.waiting)
+                    if self.firstSync is None:
+                        self.firstSync = time.time()
+                    self.queueNum += 1
+                    self.doing[self.queueNum] = self.waiting.pop(0)
+                    self.doing[self.queueNum].doingKey = self.queueNum
+                    self.doing[self.queueNum].doByThread()
+                    doingNums = len(self.doing.keys())
+                    waitingNums = len(self.waiting)
             else:
                 break
-        # 扫描完成、队列排空后：把还在等待队列的文件标记为「待处理」，完善进度总数。
-        self._record_pending()
-        try_time = 0
+        tryTime = 0
         while len(self.doing.keys()) > 0:
-            try_time += 1
-            time.sleep(0.5)
-            if try_time > 3:
+            tryTime += 1
+            time.sleep(.5)
+            if tryTime > 3:
                 break
         try:
-            if self.job.method == 2 and self._all_operations_successful():
-                self.finalize_move()
-            self.commit_source_snapshot()
+            if self.job.get('method') == 2 and self._allOperationsSuccessful():
+                self.finalizeMove()
+            self.commitSourceSnapshot()
             if self.finish:
-                add_job_task_item_many(self.job_client.session, self.finish)
-            self.update_task_status()
+                job_dao.add_job_task_item_many(self.finish, self._session_factory)
+            self.updateTaskStatus()
         finally:
-            # 确保所有进度 buffer 落盘，供 Web/CLI 实时读取与中断恢复。
-            self._flush_progress()
-            self.job_client.finish_run(self)
+            self.jobClient.finishRun(self)
 
-    def _all_operations_successful(self):
-        return (not self.break_flag
-                and self.source_scan_attempted
-                and not self.source_scan_failed
-                and all(item["status"] == 2 for item in self.finish))
+    def _allOperationsSuccessful(self):
+        return (not self.breakFlag
+                and self.sourceScanAttempted
+                and not self.sourceScanFailed
+                and all(item['status'] == 2 for item in self.finish))
 
     @staticmethod
-    def normalize_root(path):
+    def normalizeRoot(path):
         path = str(path)
-        return path if path.endswith("/") else path + "/"
+        return path if path.endswith('/') else path + '/'
 
     @staticmethod
-    def entry_location(root_path, relative_path):
-        root_path = JobTask.normalize_root(root_path)
-        if "/" not in relative_path:
-            return root_path, relative_path
-        parent, name = relative_path.rsplit("/", 1)
-        return root_path + parent + "/", name
+    def entryLocation(rootPath, relativePath):
+        rootPath = JobTask.normalizeRoot(rootPath)
+        if '/' not in relativePath:
+            return rootPath, relativePath
+        parent, name = relativePath.rsplit('/', 1)
+        return rootPath + parent + '/', name
 
-    def finalize_move(self):
-        fresh_source_directories = {}
-        destination_roots = {
-            self.normalize_root(item) for item in self.job.dst_path.split(":")
+    def finalizeMove(self):
+        freshSourceDirectories = {}
+        destinationRoots = {
+            self.normalizeRoot(item) for item in self.job['dstPath'].split(':')
         }
-        for entry in sorted(self.source_snapshot.values(), key=lambda item: item["path"]):
-            if self.break_flag or entry["isDir"] or not self.file_size_allowed(entry["size"]):
+        for entry in sorted(self.sourceSnapshot.values(), key=lambda item: item['path']):
+            if self.breakFlag or entry['isDir'] or not self.fileSizeAllowed(entry['size']):
                 continue
-            src_path, file_name = self.entry_location(self.job.src_path, entry["path"])
+            srcPath, fileName = self.entryLocation(self.job['srcPath'], entry['path'])
             matching = [item for item in self.finish
-                        if item["type"] == 2 and item["srcPath"] == src_path and item["fileName"] == file_name]
-            expected_destinations = {
-                self.entry_location(root, entry["path"])[0] for root in destination_roots
+                        if item['type'] == 2 and item['srcPath'] == srcPath
+                        and item['fileName'] == fileName]
+            expectedDestinations = {
+                self.entryLocation(root, entry['path'])[0]
+                for root in destinationRoots
             }
-            delivered_destinations = {
-                self.normalize_root(item["dstPath"]) for item in matching if item.get("dstPath")
+            deliveredDestinations = {
+                self.normalizeRoot(item['dstPath'])
+                for item in matching if item.get('dstPath')
             }
-            if (len(matching) != len(delivered_destinations)
-                    or delivered_destinations != expected_destinations):
-                self.mark_move_delete_failure(
-                    matching, src_path, file_name, entry["size"], G.move_delivery_incomplete
-                )
+            if (len(matching) != len(deliveredDestinations)
+                    or deliveredDestinations != expectedDestinations):
+                self.markMoveDeleteFailure(
+                    matching, srcPath, fileName, entry['size'], "移动目标不完整")
                 continue
             try:
-                if src_path not in fresh_source_directories:
-                    _entries, details = self.read_directory(src_path, 0, 0)
-                    fresh_source_directories[src_path] = details
-                fresh_entry = fresh_source_directories[src_path].get(file_name)
-                fresh_size = None if fresh_entry is None else fresh_entry.get("size")
+                if srcPath not in freshSourceDirectories:
+                    _entries, details = self.readDirectory(srcPath, 0, 0)
+                    freshSourceDirectories[srcPath] = details
+                freshEntry = freshSourceDirectories[srcPath].get(fileName)
+                freshSize = None if freshEntry is None else freshEntry.get('size')
             except Exception as e:
-                self.mark_move_delete_failure(matching, src_path, file_name, entry["size"], str(e))
+                self.markMoveDeleteFailure(matching, srcPath, fileName, entry['size'], str(e))
                 continue
-            if fresh_entry is not None and (fresh_entry.get("isDir") or fresh_size != entry["size"]):
-                self.mark_move_delete_failure(
-                    matching, src_path, file_name, entry["size"], G.source_changed_during_move
-                )
+            if freshEntry is not None and (freshEntry.get('isDir') or freshSize != entry['size']):
+                self.markMoveDeleteFailure(
+                    matching, srcPath, fileName, entry['size'], "移动过程中源文件发生变化")
                 continue
-            if fresh_entry is None:
+            if freshEntry is None:
                 if not matching:
-                    self.copy_hook(src_path, None, file_name, entry["size"], status=2, copy_type=2)
+                    self.copyHook(srcPath, None, fileName, entry['size'], status=2, copyType=2)
                 continue
-            expected_fingerprint = entry.get("fingerprint")
-            if expected_fingerprint is None:
-                self.mark_move_delete_failure(
-                    matching, src_path, file_name, entry["size"], G.source_version_unavailable
-                )
+            expectedFingerprint = entry.get('fingerprint')
+            if expectedFingerprint is None:
+                self.markMoveDeleteFailure(
+                    matching, srcPath, fileName, entry['size'], "源文件版本信息缺失")
                 continue
-            if fresh_entry.get("fingerprint") != expected_fingerprint:
-                self.mark_move_delete_failure(
-                    matching, src_path, file_name, entry["size"], G.source_changed_during_move
-                )
+            if freshEntry.get('fingerprint') != expectedFingerprint:
+                self.markMoveDeleteFailure(
+                    matching, srcPath, fileName, entry['size'], "移动过程中源文件发生变化")
                 continue
             try:
-                self.alist_client.delete_file(src_path, [file_name], 0)
+                self.alistClient.deleteFile(srcPath, [fileName], 0)
             except Exception as e:
-                err_msg = G.copy_success_but_delete_fail.format(str(e))
-                self.mark_move_delete_failure(matching, src_path, file_name, entry["size"], err_msg)
+                errMsg = "复制成功但删除源文件失败：{}".format(str(e))
+                self.markMoveDeleteFailure(matching, srcPath, fileName, entry['size'], errMsg)
             else:
                 if not matching:
-                    self.copy_hook(src_path, None, file_name, entry["size"], status=2, copy_type=2)
-                append_moved_file(self.job_client.session, self.job.id, file_name, src_path=src_path)
-                self.moved_file_names.add(file_name)
+                    self.copyHook(srcPath, None, fileName, entry['size'], status=2, copyType=2)
+                appendMoved_file_safe(
+                    self.job['id'], fileName, srcPath=srcPath,
+                    session_factory=self._session_factory)
+                self.movedFileNames.add(fileName)
 
-    def mark_move_delete_failure(self, matching, src_path, file_name, file_size, err_msg):
+    def markMoveDeleteFailure(self, matching, srcPath, fileName, fileSize, errMsg):
         if matching:
             for item in matching:
-                item["status"] = 7
-                item["errMsg"] = err_msg
+                item['status'] = 7
+                item['errMsg'] = errMsg
         else:
-            self.copy_hook(src_path, None, file_name, file_size, status=7,
-                          err_msg=err_msg, copy_type=2)
+            self.copyHook(srcPath, None, fileName, fileSize, status=7,
+                          errMsg=errMsg, copyType=2)
 
-    def commit_source_snapshot(self):
-        if not self._all_operations_successful():
+    def commitSourceSnapshot(self):
+        if not self._allOperationsSuccessful():
             return
-        entries = list(self.source_snapshot.values())
-        if self.job.method == 2:
+        entries = list(self.sourceSnapshot.values())
+        if self.job.get('method') == 2:
             entries = [entry for entry in entries
-                       if entry["isDir"] or not self.file_size_allowed(entry["size"])]
+                       if entry['isDir'] or not self.fileSizeAllowed(entry['size'])]
         try:
-            expected_identity = getattr(
-                self, "source_snapshot_identity", source_snapshot_identity(self.job)
-            )
-            replace_source_snapshot(
-                self.job_client.session, self.job.id, entries, expected_identity=expected_identity
-            )
+            expectedIdentity = getattr(
+                self, 'sourceSnapshotIdentity', job_dao.source_snapshot_identity(self.job))
+            job_dao.replace_source_snapshot(
+                self.job['id'], entries, expected_identity=expectedIdentity,
+                session_factory=self._session_factory)
         except Exception as e:
             logger.exception(e)
-            self.copy_hook(self.normalize_root(self.job.src_path), None, None, None,
-                          status=7, err_msg=str(e), is_path=1)
+            self.copyHook(self.normalizeRoot(self.job['srcPath']), None, None, None,
+                          status=7, errMsg=str(e), isPath=1)
 
-    def copy_hook(self, src_path, dst_path, name, size, alist_task_id=None, status=0,
-                  err_msg=None, is_path=0, copy_type=0, create_time=int(time.time())):
+    def copyHook(self, srcPath, dstPath, name, size, alistTaskId=None, status=0,
+                 errMsg=None, isPath=0, copyType=0, createTime=int(time.time())):
         self.finish.append({
-            "taskId": self.task_id,
-            "srcPath": src_path,
-            "dstPath": dst_path,
-            "isPath": is_path,
-            "fileName": name,
-            "fileSize": size,
-            "type": copy_type,
-            "alistTaskId": alist_task_id,
-            "status": status,
-            "errMsg": err_msg,
-            "createTime": create_time,
+            'taskId': self.taskId,
+            'srcPath': srcPath,
+            'dstPath': dstPath,
+            'isPath': isPath,
+            'fileName': name,
+            'fileSize': size,
+            'type': copyType,
+            'alistTaskId': alistTaskId,
+            'status': status,
+            'errMsg': errMsg,
+            'createTime': createTime,
         })
-        # 记录进度（目录标记 / 扫描错误 / 移动删除失败等非 CopyItem 来源的文件级事件）。
-        # CopyItem 自身的进度由 check_and_get_status 处理；此处覆盖其余路径。
-        if not is_path and name:
-            self._record_progress_simple(name, src_path, dst_path, size, status, err_msg)
 
-    def del_hook(self, dst_path, name, size, status=2, err_msg=None, is_path=0, create_time=int(time.time())):
+    def delHook(self, dstPath, name, size, status=2, errMsg=None, isPath=0,
+                createTime=int(time.time())):
         self.finish.append({
-            "taskId": self.task_id,
-            "srcPath": None,
-            "dstPath": dst_path,
-            "isPath": is_path,
-            "fileName": name,
-            "fileSize": size,
-            "type": 1,
-            "alistTaskId": None,
-            "status": status,
-            "errMsg": err_msg,
-            "createTime": create_time,
+            'taskId': self.taskId,
+            'srcPath': None,
+            'dstPath': dstPath,
+            'isPath': isPath,
+            'fileName': name,
+            'fileSize': size,
+            'type': 1,
+            'alistTaskId': None,
+            'status': status,
+            'errMsg': errMsg,
+            'createTime': createTime,
         })
 
     def sync(self):
-        src_path = self.normalize_root(self.job.src_path)
-        job_exclude = self.job.exclude
+        srcPath = self.normalizeRoot(self.job['srcPath'])
+        jobExclude = self.job['exclude']
         spec = None
-        if job_exclude is not None:
-            spec = PathSpec.from_lines(GitWildMatchPattern, job_exclude.split(":"))
-        dst_path_list = [self.normalize_root(item) for item in self.job.dst_path.split(":")]
+        if jobExclude is not None:
+            spec = PathSpec.from_lines(GitWildMatchPattern, jobExclude.split(':'))
+        dstPathList = [self.normalizeRoot(item) for item in self.job['dstPath'].split(':')]
         try:
-            paths_overlap = getattr(self.alist_client, "paths_overlap", virtual_paths_overlap)
-            if any(paths_overlap(src_path, dst_path) for dst_path in dst_path_list):
-                raise ValueError(G.source_target_overlap)
-            stored_snapshot = get_source_snapshot(self.job_client.session, self.job.id)
-            if stored_snapshot["meta"]["initialized"] == 1:
-                self.previous_source_snapshot = {
-                    item["path"]: item for item in stored_snapshot["entries"]
+            pathsOverlap = getattr(self.alistClient, 'pathsOverlap', virtual_paths_overlap)
+            if any(pathsOverlap(srcPath, dstPath) for dstPath in dstPathList):
+                raise ValueError("来源与目录存在重叠，已拒绝执行")
+            storedSnapshot = job_dao.get_source_snapshot(
+                self.job['id'], self._session_factory)
+            if storedSnapshot['meta']['initialized'] == 1:
+                self.previousSourceSnapshot = {
+                    item['path']: item for item in storedSnapshot['entries']
                 }
             else:
-                self.previous_source_snapshot = None
-            if self.job.source_mode == 1 and stored_snapshot["meta"]["initialized"] == 1:
-                if self.scan_source_tree(src_path, spec, src_path):
-                    self.sync_from_source_snapshot(stored_snapshot["entries"], dst_path_list)
+                self.previousSourceSnapshot = None
+            if self.job.get('sourceMode') == 1 and storedSnapshot['meta']['initialized'] == 1:
+                if self.scanSourceTree(srcPath, spec, srcPath):
+                    self.syncFromSourceSnapshot(storedSnapshot['entries'], dstPathList)
             else:
-                for index, dst_item in enumerate(dst_path_list):
-                    self.sync_with_have(src_path, dst_item, spec, src_path, dst_item, index == 0)
+                for index, dstItem in enumerate(dstPathList):
+                    self.syncWithHave(srcPath, dstItem, spec, srcPath, dstItem, index == 0)
         except Exception as e:
             logger.exception(e)
-            self.source_scan_failed = True
-            self.copy_hook(src_path, None, None, None, status=7, err_msg=str(e), is_path=1)
+            self.sourceScanFailed = True
+            self.copyHook(srcPath, None, None, None, status=7, errMsg=str(e), isPath=1)
         finally:
-            self.scan_finish = True
+            self.scanFinish = True
 
-    def scan_source_tree(self, path, spec, root_path):
-        if self.break_flag:
+    def scanSourceTree(self, path, spec, rootPath):
+        if self.breakFlag:
             return False
         try:
-            entries = self.list_dir(path, True, spec, root_path)
+            entries = self.listDir(path, True, spec, rootPath)
         except Exception:
             return False
         for name in entries:
-            if name.endswith("/") and not self.scan_source_tree(path + name, spec, root_path):
+            if name.endswith('/') and not self.scanSourceTree(path + name, spec, rootPath):
                 return False
-        return not self.break_flag and not self.source_scan_failed
+        return not self.breakFlag and not self.sourceScanFailed
 
-    def sync_from_source_snapshot(self, stored_entries, dst_path_list):
+    def syncFromSourceSnapshot(self, storedEntries, dstPathList):
         previous = {
-            item["path"]: {
-                "path": item["path"], "isDir": int(item["isDir"]),
-                "size": item["size"], "fingerprint": item.get("fingerprint"),
-            }
-            for item in stored_entries
+            item['path']: {
+                'path': item['path'], 'isDir': int(item['isDir']),
+                'size': item['size'], 'fingerprint': item.get('fingerprint'),
+            } for item in storedEntries
         }
-        current = self.source_snapshot
-
-        changed_files = [entry for path, entry in current.items()
-                        if not entry["isDir"]
-                        and self.file_size_allowed(entry["size"])
-                        and (self.job.method == 2
-                             or self.source_entry_changed(previous.get(path), entry))]
-        new_directories = [entry for path, entry in current.items()
-                          if entry["isDir"]
-                          and (path not in previous or not previous[path]["isDir"])]
-
+        current = self.sourceSnapshot
+        changedFiles = [entry for path, entry in current.items()
+                        if not entry['isDir']
+                        and self.fileSizeAllowed(entry['size'])
+                        and (self.job['method'] == 2
+                             or self.sourceEntryChanged(previous.get(path), entry))]
+        newDirectories = [entry for path, entry in current.items()
+                          if entry['isDir']
+                          and (path not in previous or not previous[path]['isDir'])]
         removed = [entry for path, entry in previous.items()
-                   if path not in current or current[path]["isDir"] != entry["isDir"]]
-
-        for dst_root in dst_path_list:
-            failed_directory_prefixes = []
-            if self.job.method == 1:
-                self.delete_snapshot_entries(dst_root, removed)
-
-            for entry in sorted(new_directories, key=lambda item: (item["path"].count("/"), item["path"])):
-                if any(self.path_within(entry["path"], prefix) for prefix in failed_directory_prefixes):
+                   if path not in current or current[path]['isDir'] != entry['isDir']]
+        for dstRoot in dstPathList:
+            failedDirectoryPrefixes = []
+            if self.job['method'] == 1:
+                self.deleteSnapshotEntries(dstRoot, removed)
+            for entry in sorted(newDirectories, key=lambda item: (item['path'].count('/'), item['path'])):
+                if any(self.pathWithin(entry['path'], prefix) for prefix in failedDirectoryPrefixes):
                     continue
-                dst_path = dst_root + entry["path"] + "/"
-                src_path = self.normalize_root(self.job.src_path) + entry["path"] + "/"
+                dstPath = dstRoot + entry['path'] + '/'
+                srcPath = self.normalizeRoot(self.job['srcPath']) + entry['path'] + '/'
                 status = 2
-                err_msg = None
+                errMsg = None
                 try:
-                    self.alist_client.mkdir(dst_path, self.job.scan_interval_t)
+                    self.alistClient.mkdir(dstPath, self.job['scanIntervalT'])
                 except Exception as e:
                     status = 7
-                    err_msg = str(e)
-                    failed_directory_prefixes.append(entry["path"])
-                self.copy_hook(src_path, dst_path, None, None, status=status, err_msg=err_msg, is_path=1)
-
-            for entry in changed_files:
-                parent_path, file_name = self.entry_location(dst_root, entry["path"])
-                if any(self.path_within(entry["path"], prefix) for prefix in failed_directory_prefixes):
+                    errMsg = str(e)
+                    failedDirectoryPrefixes.append(entry['path'])
+                self.copyHook(srcPath, dstPath, None, None, status=status, errMsg=errMsg, isPath=1)
+            for entry in changedFiles:
+                parentPath, fileName = self.entryLocation(dstRoot, entry['path'])
+                if any(self.pathWithin(entry['path'], prefix) for prefix in failedDirectoryPrefixes):
                     continue
-                src_path, _ = self.entry_location(self.job.src_path, entry["path"])
-                self.copy_file(src_path, parent_path, file_name, entry["size"])
+                srcPath, _ = self.entryLocation(self.job['srcPath'], entry['path'])
+                self.copyFile(srcPath, parentPath, fileName, entry['size'])
 
     @staticmethod
-    def path_within(path, prefix):
-        return path == prefix or path.startswith(prefix + "/")
+    def pathWithin(path, prefix):
+        return path == prefix or path.startswith(prefix + '/')
 
     @staticmethod
-    def source_entry_changed(previous, current):
-        if (previous is None or previous.get("isDir")
-                or previous.get("size") != current.get("size")):
+    def sourceEntryChanged(previous, current):
+        if (previous is None or previous.get('isDir')
+                or previous.get('size') != current.get('size')):
             return True
-        previous_fingerprint = previous.get("fingerprint")
-        current_fingerprint = current.get("fingerprint")
-        return ((previous_fingerprint is not None or current_fingerprint is not None)
-                and previous_fingerprint != current_fingerprint)
+        previousFingerprint = previous.get('fingerprint')
+        currentFingerprint = current.get('fingerprint')
+        return ((previousFingerprint is not None or currentFingerprint is not None)
+                and previousFingerprint != currentFingerprint)
 
-    def source_file_changed_since_snapshot(self, src_path, src_root_path, file_name):
-        previous = getattr(self, "previous_source_snapshot", None)
+    def sourceFileChangedSinceSnapshot(self, srcPath, srcRootPath, fileName):
+        previous = getattr(self, 'previousSourceSnapshot', None)
         if previous is None:
             return False
         relative_base = (
-            src_path[len(src_root_path):].strip("/")
-            if src_path.startswith(src_root_path) else ""
-        )
-        relative_path = "/".join(item for item in (relative_base, file_name) if item)
-        current = self.source_snapshot.get(relative_path)
-        previous_entry = previous.get(relative_path)
+            srcPath[len(srcRootPath):].strip('/') if srcPath.startswith(srcRootPath) else '')
+        relativePath = '/'.join(item for item in (relative_base, fileName) if item)
+        current = self.sourceSnapshot.get(relativePath)
+        previous_entry = previous.get(relativePath)
         return (current is not None and previous_entry is not None
-                and self.source_entry_changed(previous_entry, current))
+                and self.sourceEntryChanged(previous_entry, current))
 
-    def delete_snapshot_entries(self, dst_root, removed_entries):
-        for entry in removed_entries:
-            if entry["isDir"] or not self.file_size_allowed(entry["size"]):
+    def deleteSnapshotEntries(self, dstRoot, removedEntries):
+        for entry in removedEntries:
+            if entry['isDir'] or not self.fileSizeAllowed(entry['size']):
                 continue
-            parent_path, name = self.entry_location(dst_root, entry["path"])
-            self.del_file(parent_path, name, entry["size"])
+            parentPath, name = self.entryLocation(dstRoot, entry['path'])
+            self.delFile(parentPath, name, entry['size'])
 
-    def copy_file(self, src_path, dst_path, file_name, file_size):
-        if self.break_flag:
+    def copyFile(self, srcPath, dstPath, fileName, fileSize):
+        if self.breakFlag:
             return
-        if self.job.method == 2 and file_name in self.moved_file_names:
-            logger.info(G.move_skipped_logged.format(fileName=file_name, srcPath=src_path))
-            self.copy_hook(src_path, dst_path, file_name, file_size, status=2, copy_type=2,
-                          err_msg=G.move_already_logged)
+        if self.job['method'] == 2 and fileName in self.movedFileNames:
+            logger.info("跳过已移动文件：%s（源：%s）", fileName, srcPath)
+            self.copyHook(srcPath, dstPath, fileName, fileSize, status=2, copyType=2,
+                          errMsg="该文件已移动过（记录于移动日志）")
             return
-        copy_item = CopyItem(src_path, dst_path, file_name, file_size, self.job.method, self)
-        self.waiting.append(copy_item)
+        copyItem = CopyItem(srcPath, dstPath, fileName, fileSize, self.job['method'], self)
+        self.waiting.append(copyItem)
 
-    def has_file_size_filter(self):
-        return self.job.min_file_size is not None or self.job.max_file_size is not None
+    def hasFileSizeFilter(self):
+        return self.job.get('minFileSize') is not None or self.job.get('maxFileSize') is not None
 
-    def file_size_allowed(self, file_size):
-        return is_file_size_allowed(file_size, self.job.min_file_size, self.job.max_file_size)
+    def fileSizeAllowed(self, fileSize):
+        return is_file_size_allowed(file_size=fileSize, min_file_size=self.job.get('minFileSize'),
+                                    max_file_size=self.job.get('maxFileSize'))
 
-    def del_file(self, path, file_name, size):
-        if self.break_flag:
+    def delFile(self, path, fileName, size):
+        if self.breakFlag:
             return
-        is_path = file_name.endswith("/")
+        isPath = fileName.endswith('/')
         status = 2
-        err_msg = None
-        create_time = int(time.time())
+        errMsg = None
+        createTime = int(time.time())
         try:
-            self.alist_client.delete_file(
-                path, [file_name if not is_path else file_name[:-1]], self.job.scan_interval_t
-            )
+            self.alistClient.deleteFile(
+                path, [fileName if not isPath else fileName[:-1]], self.job['scanIntervalT'])
         except Exception as e:
             status = 7
-            err_msg = str(e)
-        self.del_hook(path, file_name, None if is_path else size, status, err_msg, is_path, create_time)
+            errMsg = str(e)
+        self.delHook(path, fileName, None if isPath else size, status, errMsg, isPath, createTime)
 
-    def list_dir(self, path, first_dst, spec, root_path, is_src=True):
-        use_cache = 1 if is_src and not first_dst else getattr(self.job, f"use_cache_{'s' if is_src else 't'}")
-        scan_interval = getattr(self.job, f"scan_interval_{'s' if is_src else 't'}")
+    def listDir(self, path, firstDst, spec, rootPath, isSrc=True):
+        useCache = 1 if isSrc and not firstDst else self.job["useCache{}".format('S' if isSrc else 'T')]
+        scanInterval = self.job["scanInterval{}".format('S' if isSrc else 'T')]
         try:
-            entries, details = self.read_directory(path, use_cache, scan_interval, spec, root_path)
-            if is_src and first_dst:
-                self.record_source_entries(path, root_path, entries, details)
+            entries, details = self.readDirectory(path, useCache, scanInterval, spec, rootPath)
+            if isSrc and firstDst:
+                self.recordSourceEntries(path, rootPath, entries, details)
             return entries
         except Exception as e:
-            err_msg = G.scan_error.format(G.src if is_src else G.dst, str(e))
-            logger.error(err_msg)
+            errMsg = "扫描{}目录出错：{}".format('来源' if isSrc else '目标', str(e))
+            logger.error(errMsg)
             logger.exception(e)
-            if is_src and first_dst:
-                self.source_scan_attempted = True
-                self.source_scan_failed = True
-            self.copy_hook(path if is_src else None, None if is_src else path, None, None,
-                          status=7, err_msg=err_msg, is_path=1)
+            if isSrc and firstDst:
+                self.sourceScanAttempted = True
+                self.sourceScanFailed = True
+            self.copyHook(path if isSrc else None, None if isSrc else path, None, None,
+                          status=7, errMsg=errMsg, isPath=1)
             raise e
 
-    def read_directory(self, path, use_cache=0, scan_interval=0, spec=None, root_path=None):
-        detail_api = getattr(self.alist_client, "file_list_detail_api", None)
-        if callable(detail_api):
-            raw_details = detail_api(path, use_cache, scan_interval, spec, root_path)
+    def readDirectory(self, path, useCache=0, scanInterval=0, spec=None, rootPath=None):
+        detailApi = getattr(self.alistClient, 'fileListDetailApi', None)
+        if callable(detailApi):
+            rawDetails = detailApi(path, useCache, scanInterval, spec, rootPath)
             details = {}
             entries = {}
-            for name, raw_detail in raw_details.items():
-                detail = raw_detail if isinstance(raw_detail, dict) else {}
-                is_directory = bool(detail.get("isDir", name.endswith("/")))
-                size = None if is_directory else detail.get("size")
+            for name, rawDetail in rawDetails.items():
+                detail = rawDetail if isinstance(rawDetail, dict) else {}
+                isDirectory = bool(detail.get('isDir', name.endswith('/')))
+                size = None if isDirectory else detail.get('size')
                 details[name] = {
-                    "isDir": 1 if is_directory else 0,
-                    "size": size,
-                    "fingerprint": detail.get("fingerprint"),
+                    'isDir': 1 if isDirectory else 0,
+                    'size': size,
+                    'fingerprint': detail.get('fingerprint'),
                 }
-                entries[name] = {} if is_directory else size
+                entries[name] = {} if isDirectory else size
             return entries, details
-
-        entries = self.alist_client.file_list_api(path, use_cache, scan_interval, spec, root_path)
+        entries = self.alistClient.fileListApi(path, useCache, scanInterval, spec, rootPath)
         details = {
             name: {
-                "isDir": 1 if name.endswith("/") else 0,
-                "size": None if name.endswith("/") else size,
-                "fingerprint": None,
-            }
-            for name, size in entries.items()
+                'isDir': 1 if name.endswith('/') else 0,
+                'size': None if name.endswith('/') else size,
+                'fingerprint': None,
+            } for name, size in entries.items()
         }
         return entries, details
 
-    def record_source_entries(self, path, root_path, entries, details=None):
-        self.source_scan_attempted = True
-        relative_base = path[len(root_path):].strip("/") if path.startswith(root_path) else ""
+    def recordSourceEntries(self, path, rootPath, entries, details=None):
+        self.sourceScanAttempted = True
+        relativeBase = path[len(rootPath):].strip('/') if path.startswith(rootPath) else ''
         for name, size in entries.items():
-            is_directory = name.endswith("/")
-            clean_name = name[:-1] if is_directory else name
-            relative_path = "/".join(item for item in (relative_base, clean_name) if item)
+            isDirectory = name.endswith('/')
+            cleanName = name[:-1] if isDirectory else name
+            relativePath = '/'.join(item for item in (relativeBase, cleanName) if item)
             entry = {
-                "path": relative_path,
-                "isDir": 1 if is_directory else 0,
-                "size": None if is_directory else size,
+                'path': relativePath,
+                'isDir': 1 if isDirectory else 0,
+                'size': None if isDirectory else size,
             }
-            fingerprint = (details or {}).get(name, {}).get("fingerprint")
+            fingerprint = (details or {}).get(name, {}).get('fingerprint')
             if fingerprint is not None:
-                entry["fingerprint"] = fingerprint
-            self.source_snapshot[relative_path] = entry
+                entry['fingerprint'] = fingerprint
+            self.sourceSnapshot[relativePath] = entry
 
-    def delete_target_only_dir(self, dst_path, spec, dst_root_path, first_dst):
-        if self.break_flag:
+    def deleteTargetOnlyDir(self, dstPath, spec, dstRootPath, firstDst):
+        if self.breakFlag:
             return
         try:
-            dst_files = self.list_dir(dst_path, first_dst, spec, dst_root_path, False)
+            dstFiles = self.listDir(dstPath, firstDst, spec, dstRootPath, False)
         except Exception:
             return
-        for key, size in dst_files.items():
-            if self.break_flag:
+        for key, size in dstFiles.items():
+            if self.breakFlag:
                 return
-            if key.endswith("/"):
-                self.delete_target_only_dir(dst_path + key, spec, dst_root_path, first_dst)
-            elif self.file_size_allowed(size):
-                self.del_file(dst_path, key, size)
+            if key.endswith('/'):
+                self.deleteTargetOnlyDir(dstPath + key, spec, dstRootPath, firstDst)
+            elif self.fileSizeAllowed(size):
+                self.delFile(dstPath, key, size)
 
-    def sync_with_have(self, src_path, dst_path, spec, src_root_path, dst_root_path, first_dst):
-        if self.break_flag:
+    def syncWithHave(self, srcPath, dstPath, spec, srcRootPath, dstRootPath, firstDst):
+        if self.breakFlag:
             return
         try:
-            src_files = self.list_dir(src_path, first_dst, spec, src_root_path)
-            dst_files = self.list_dir(dst_path, first_dst, spec, dst_root_path, False)
+            srcFiles = self.listDir(srcPath, firstDst, spec, srcRootPath)
+            dstFiles = self.listDir(dstPath, firstDst, spec, dstRootPath, False)
         except Exception:
             return
-        for key in src_files.keys():
-            if not key.endswith("/"):
-                if not self.file_size_allowed(src_files[key]):
+        for key in srcFiles.keys():
+            if not key.endswith('/'):
+                if not self.fileSizeAllowed(srcFiles[key]):
                     continue
-                if (self.job.method == 2
-                        or self.source_file_changed_since_snapshot(src_path, src_root_path, key)
-                        or key not in dst_files or dst_files[key] != src_files[key]):
-                    self.copy_file(src_path, dst_path, key, src_files[key])
+                if (self.job['method'] == 2
+                        or self.sourceFileChangedSinceSnapshot(srcPath, srcRootPath, key)
+                        or key not in dstFiles or dstFiles[key] != srcFiles[key]):
+                    self.copyFile(srcPath, dstPath, key, srcFiles[key])
             else:
-                if key not in dst_files:
-                    self.sync_with_out_have(src_path + key, dst_path + key, spec, src_root_path, dst_root_path, first_dst)
+                if key not in dstFiles:
+                    self.syncWithOutHave(srcPath + key, dstPath + key, spec, srcRootPath,
+                                         dstRootPath, firstDst)
                 else:
-                    self.sync_with_have(src_path + key, dst_path + key, spec, src_root_path, dst_root_path, first_dst)
-        if self.job.method == 1:
-            for dst_key in dst_files.keys():
-                if dst_key not in src_files:
-                    if dst_key.endswith("/") and self.has_file_size_filter():
-                        self.delete_target_only_dir(dst_path + dst_key, spec, dst_root_path, first_dst)
-                    elif dst_key.endswith("/") or self.file_size_allowed(dst_files[dst_key]):
-                        self.del_file(dst_path, dst_key, dst_files[dst_key])
+                    self.syncWithHave(srcPath + key, dstPath + key, spec, srcRootPath,
+                                      dstRootPath, firstDst)
+        if self.job['method'] == 1:
+            for dstKey in dstFiles.keys():
+                if dstKey not in srcFiles:
+                    if dstKey.endswith('/') and self.hasFileSizeFilter():
+                        self.deleteTargetOnlyDir(dstPath + dstKey, spec, dstRootPath, firstDst)
+                    elif dstKey.endswith('/') or self.fileSizeAllowed(dstFiles[dstKey]):
+                        self.delFile(dstPath, dstKey, dstFiles[dstKey])
 
-    def sync_with_out_have(self, src_path, dst_path, spec, src_root_path, dst_root_path, first_dst):
-        if self.break_flag:
+    def syncWithOutHave(self, srcPath, dstPath, spec, srcRootPath, dstRootPath, firstDst):
+        if self.breakFlag:
             return
         status = 2
-        err_msg = None
+        errMsg = None
         try:
-            self.alist_client.mkdir(dst_path, self.job.scan_interval_t)
+            self.alistClient.mkdir(dstPath, self.job['scanIntervalT'])
         except Exception as e:
             status = 7
-            err_msg = str(e)
-        self.copy_hook(src_path, dst_path, None, None, status=status, err_msg=err_msg, is_path=1)
+            errMsg = str(e)
+        self.copyHook(srcPath, dstPath, None, None, status=status, errMsg=errMsg, isPath=1)
         if status != 2:
             return
         try:
-            src_files = self.list_dir(src_path, first_dst, spec, src_root_path)
+            srcFiles = self.listDir(srcPath, firstDst, spec, srcRootPath)
         except Exception:
             return
-        for key in src_files.keys():
-            if self.break_flag:
+        for key in srcFiles.keys():
+            if self.breakFlag:
                 break
-            if key.endswith("/"):
-                self.sync_with_out_have(src_path + key, dst_path + key, spec, src_root_path, dst_root_path, first_dst)
-            elif self.file_size_allowed(src_files[key]):
-                self.copy_file(src_path, dst_path, key, src_files[key])
+            if key.endswith('/'):
+                self.syncWithOutHave(srcPath + key, dstPath + key, spec, srcRootPath,
+                                      dstRootPath, firstDst)
+            elif self.fileSizeAllowed(srcFiles[key]):
+                self.copyFile(srcPath, dstPath, key, srcFiles[key])
 
-    def update_task_status(self):
-        self.get_current()
-        fail_or_other_num = len(self.current_tasks[7]) + len(self.current_tasks[-1])
-        status = 7 if self.break_flag else 2 if fail_or_other_num == 0 else 3
-        self.job_client.persist_task_status(
-            self.task_id, status, self.current_tasks, int(self.create_time)
-        )
-        # 归档一条同步记录（同步操作历史日志）。
-        self._write_sync_record(status)
+    def updateTaskStatus(self):
+        from core.sync import task_service
+        self.getCurrent()
+        failOrOtherNum = len(self.currentTasks[7]) + len(self.currentTasks[-1])
+        status = 7 if self.breakFlag else 2 if failOrOtherNum == 0 else 3
+        task_service.update_job_task_status(
+            self.taskId, status, taskList=self.currentTasks,
+            createTime=self.createTime, notifier=self._notifier,
+            session_factory=self._session_factory)
 
-    def _write_sync_record(self, status: int) -> None:
-        """把本次运行结果写入 sync_records 历史表，供审计 / 导出 / 过滤查询。"""
-        try:
-            from core.sync.job_dao import add_sync_record
 
-            # 成功同步（移动）的文件数与数据量：finish 中 status==2 的明细。
-            success_items = [it for it in self.finish if it.get("status") == 2]
-            data_count = len(success_items)
-            data_size = sum(int(it.get("fileSize") or 0) for it in success_items)
-
-            # 错误信息：汇总失败/异常明细的 errMsg（最多取前若干条）。
-            err_items = [
-                it for it in self.finish
-                if it.get("status") not in (2, None) and it.get("errMsg")
-            ]
-            err_msg = ""
-            if err_items:
-                err_msg = "；".join(
-                    f"{it.get('fileName', '')}: {it.get('errMsg', '')}"
-                    for it in err_items[:5]
-                )
-            if self.break_flag and not err_msg:
-                err_msg = "任务被中止/中断"
-
-            record = {
-                "jobId": self.job.id,
-                "jobName": getattr(self.job, "remark", "") or "",
-                "operator": self.job_client.operator or "自动调度",
-                "status": int(status),
-                "dataCount": data_count,
-                "dataSize": data_size,
-                "errMsg": err_msg[:2000],
-                "startTime": int(self.create_time),
-                "endTime": int(time.time()),
-                "createTime": int(time.time()),
-            }
-            add_sync_record(self.job_client.session, record)
-        except Exception:
-            logger.exception("写入同步记录失败（不影响主流程）")
-
-    def finish_run(self):
-        self.job_client.finish_run(self)
+def append_moved_file_safe(job_id, file_name, src_path=None, session_factory=None):
+    try:
+        append_moved_file(job_id, file_name, src_path=src_path, session_factory=session_factory)
+    except Exception as e:
+        logger.exception(e)
 
 
 class JobClient:
-    def __init__(self, job, session, is_init=False, session_factory=None):
-        self.session = session
-        # session_factory：供手动触发 / 定时调度在后台线程内重新开 session
-        # 并重新加载 job，避免复用请求级 / 缓存里已 detached 的 SyncJob 实例。
-        self.session_factory = session_factory
+    def __init__(self, job, isInit=False, notifier=None, session_factory=None):
+        addJobId = 0
+        if 'enable' not in job:
+            job['enable'] = 1
+        if 'method' not in job:
+            job['method'] = 0
+        if 'id' not in job:
+            addJobId = job_dao.add_job(job, session_factory)
+            job = job_dao.get_job_by_id(addJobId, session_factory)
+        self.jobId = job['id']
         self.job = job
-        self.job_id = job.id
+        self._notifier = notifier
+        self._session_factory = session_factory
         self.scheduled = None
-        self.scheduled_job = None
-        self.job_doing = False
-        self.run_lock = threading.Lock()
-        self.current_job_task = None
-        self.notify_hook = None
-        # operator：本次运行的操作人员 / 触发来源（手动 / 自动调度 / system）。
-        self.operator = "自动调度"
+        self.scheduledJob = None
+        self.jobDoing = False
+        self.runLock = threading.Lock()
+        self.currentJobTask = None
         try:
-            self.do_by_time()
+            self.doByTime()
         except Exception as e:
-            if is_init:
-                logger.error(G.del_job_course_error.format(json.dumps({
-                    "id": getattr(self.job, "id", None), "srcPath": self.job.src_path,
-                    "dstPath": self.job.dst_path,
-                }, ensure_ascii=False)))
-                try:
-                    delete_job(self.session, self.job_id)
-                except Exception:
-                    pass
+            if isInit or addJobId != 0:
+                logger.error("添加同步作业过程出错：%s", json_dumps(job))
+                job_dao.delete_job(self.jobId, session_factory)
             raise e
 
-    def persist_task_status(self, task_id, status, task_list, create_time):
-        """落库任务状态 + 统计 taskNum，并触发通知（若已装配）。"""
-        from core.sync.job_dao import update_job_task_status, update_job_task_num_many
-
-        duration = int(time.time() - create_time) if create_time else None
-        hours, minutes, seconds = convert_seconds(duration)
-        duration_text = f"{hours}时{minutes}分{seconds}秒"
-        sum_size = sum(
-            item["fileSize"] for item in task_list.get(2, [])
-            if item["fileSize"] is not None
-        )
-        size_text = convert_bytes(sum_size)
-        task_num = {
-            "waitNum": 0, "runningNum": 0,
-            "successNum": len(task_list.get(2, [])),
-            "failNum": len(task_list.get(7, [])),
-            "otherNum": len(task_list.get(-1, [])),
-            "allNum": len(task_list.get(2, [])) + len(task_list.get(7, [])) + len(task_list.get(-1, [])),
-            "duration": duration,
-            "sumSize": sum_size,
-        }
-        update_job_task_status(self.session, task_id, status)
-        update_job_task_num_many(self.session, [{
-            "taskId": task_id, "taskNum": json.dumps(task_num, ensure_ascii=False),
-        }])
-        if self.notify_hook is not None:
-            try:
-                job = get_job_by_id(self.session, self.job_id)
-                self.notify_hook(job, status, task_num, duration_text, size_text)
-            except Exception:
-                logger.exception("同步任务结束通知失败")
-
-    def _reload_job(self, session):
-        """后台线程入口：用本线程 session 重新加载 job，确保 bound。"""
-        from core.sync.job_dao import get_job_by_id
-
-        self.session = session
-        self.job = get_job_by_id(session, self.job_id)
-
-    def _ensure_job_bound(self):
-        """兜底：若 self.job 未绑定当前 session，重新加载。"""
-        if self.job is None or self.job not in self.session:
-            from core.sync.job_dao import get_job_by_id
-
-            self.job = get_job_by_id(self.session, self.job_id)
-
-    def do_job(self, lock_acquired=False, operator=None):
-        if not lock_acquired and not self.run_lock.acquire(blocking=False):
+    def doJob(self, lockAcquired=False):
+        if not lockAcquired and not self.runLock.acquire(blocking=False):
             return
-        if operator:
-            self.operator = operator
-        self.job_doing = True
-
-        # 优先走「后台线程内自有 session」路径：手动触发与定时调度共用，
-        # 保证 SyncJob 在执行期间始终 bound 到存活 session，杜绝
-        # "Instance is not bound to a Session" 的 attribute refresh 报错。
-        if self.session_factory is not None:
-            with self.session_factory() as session:
-                self._reload_job(session)
-                self._run_job_inner()
-            return
-
-        # 兜底（无 factory 时）：依赖调用方已保证 session 存活。
-        self._ensure_job_bound()
-        self._run_job_inner()
-
-    def _run_job_inner(self):
-        """在「已绑定 session」的上下文中执行一次同步（线程安全边界）。"""
-        task_id = None
+        self.jobDoing = True
+        taskId = None
         try:
-            task_id = add_job_task(self.session, {
-                "jobId": self.job_id,
-                "runTime": int(time.time()),
-            })
-            if self.job.enable == 0:
+            taskId = job_dao.add_job_task({
+                'jobId': self.jobId,
+                'runTime': int(time.time()),
+            }, self._session_factory)
+            if self.job['enable'] == 0:
                 raise Exception("abort")
-            task = JobTask(task_id, self)
-            self.current_job_task = task
+            task = JobTask(taskId, self, self._notifier, self._session_factory)
+            self.currentJobTask = task
             task.start()
-            # 阻塞等待后台 sync / submit 子线程结束，确保 self.session 的
-            # 生命周期完整覆盖整个扫描 + 复制 + 落库过程（子线程均使用 self.session）。
-            task.sync_thread.join()
-            task.submit_thread.join()
-            self.session.commit()
         except Exception as e:
-            self.finish_run()
-            err_msg = G.do_job_err.format(str(e))
-            logger.error(err_msg)
-            if task_id is not None:
-                update_job_task_status(self.session, task_id, 6, err_msg)
-                try:
-                    self.session.commit()
-                except Exception:
-                    pass
+            self.finishRun()
+            errMsg = "执行同步作业出错：{}".format(str(e))
+            logger.error(errMsg)
+            if taskId is not None:
+                from core.sync import task_service
+                task_service.update_job_task_status(
+                    taskId, 6, errMsg, notifier=self._notifier,
+                    session_factory=self._session_factory)
             logger.exception(e)
 
-    def do_manual(self, operator="手动", session_factory=None):
-        if not self.run_lock.acquire(blocking=False):
-            raise Exception(G.job_running)
-        self.operator = operator or "手动"
-        self.job_doing = True
-        sf = session_factory or self.session_factory
+    def doManual(self):
+        if not self.runLock.acquire(blocking=False):
+            raise Exception("作业正在运行中")
+        self.jobDoing = True
+        doJobThread = threading.Thread(
+            target=self.doJob, kwargs={'lockAcquired': True})
+        doJobThread.start()
 
-        def _run():
-            if sf is not None:
-                with sf() as session:
-                    self._reload_job(session)
-                    self.do_job(lock_acquired=True, operator=self.operator)
-            else:
-                # 兜底：无 factory 时直接跑（调用方需保证传入的 session 存活）。
-                self.do_job(lock_acquired=True, operator=self.operator)
-
-        do_job_thread = threading.Thread(
-            target=_run, name="job-manual-" + str(self.job_id), daemon=True
-        )
-        do_job_thread.start()
-
-    def finish_run(self, task=None):
-        if task is None or self.current_job_task is task:
-            self.current_job_task = None
-        self.job_doing = False
-        if self.run_lock.locked():
+    def finishRun(self, task=None):
+        if task is None or self.currentJobTask is task:
+            self.currentJobTask = None
+        self.jobDoing = False
+        if self.runLock.locked():
             try:
-                self.run_lock.release()
+                self.runLock.release()
             except RuntimeError:
                 pass
 
-    def do_by_time(self):
+    def doByTime(self):
         params = {
-            "func": self.do_job,
-            "misfire_grace_time": 15 * 60,
-            "trigger": "interval" if self.job.is_cron == 0 else "cron",
+            'func': self.doJob,
+            'misfire_grace_time': 15 * 60,
+            'trigger': 'interval' if self.job['isCron'] == 0 else 'cron',
         }
-        if self.job.is_cron == 0:
-            interval = self.job.interval
-            if interval is not None and str(interval).strip() != "":
-                params["minutes"] = interval
+        if self.job['isCron'] == 0:
+            interval = self.job['interval']
+            if interval is not None and str(interval).strip() != '':
+                params['minutes'] = interval
             else:
-                raise Exception(G.interval_lost)
-        elif self.job.is_cron == 1:
+                raise Exception("同步间隔丢失")
+        elif self.job['isCron'] == 1:
             flag = 0
-            for item in ["year", "month", "day", "week", "day_of_week", "hour", "minute", "second",
-                         "start_date", "end_date"]:
-                value = getattr(self.job, item, None)
-                if value is not None and str(value) != "":
+            for item in ['year', 'month', 'day', 'week', 'day_of_week', 'hour', 'minute',
+                         'second', 'start_date', 'end_date']:
+                if item in self.job and self.job[item] is not None and self.job[item] != '':
                     flag += 1
-                    params[item] = value
+                    params[item] = self.job[item]
             if flag == 0:
-                raise Exception(G.cron_lost)
+                raise Exception("cron 配置丢失")
         else:
             return
         self.scheduled = BackgroundScheduler()
-        self.scheduled_job = self.scheduled.add_job(**params)
+        self.scheduledJob = self.scheduled.add_job(**params)
         self.scheduled.start()
-        if self.job.enable == 0:
-            self.scheduled_job.pause()
+        if self.job['enable'] == 0:
+            self.scheduledJob.pause()
 
-    def resume_job(self):
-        if self.scheduled_job is None:
-            raise Exception(G.cannot_resume_lost_job)
-        update_job_enable(self.session, self.job_id, 1)
-        self.job.enable = 1
-        self.scheduled_job.resume()
+    def resumeJob(self):
+        if self.scheduledJob is None:
+            raise Exception("无法恢复已丢失调度的作业")
+        job_dao.update_job_enable(self.jobId, 1, self._session_factory)
+        self.job['enable'] = 1
+        self.scheduledJob.resume()
 
-    def abort_job(self):
-        if self.current_job_task:
-            self.current_job_task.break_flag = True
+    def abortJob(self):
+        if self.currentJobTask:
+            self.currentJobTask.breakFlag = True
 
-    def get_progress(self, recovered_base: int = 0, session=None) -> dict:
-        """聚合实时进度（持久化 sync_progress），供 Web 轮询 / CLI 展示。
-
-        recovered_base：本次运行基于「历史已成功文件数」的恢复基数（中断恢复显示），
-        计入整体进度的「已完成」分母，使跨运行累计完成度正确。
-
-        session：必须传入「调用方（请求线程）自己的、存活的 session」。
-        严禁复用 self.session —— 它是后台运行线程私有的、会随线程退出而关闭，
-        跨线程/跨生命周期使用会触发 "Instance is not bound to a Session"。
-        """
-        from core.sync.job_dao import (
-            get_progress_active,
-            get_progress_recent_done,
-            get_progress_summary,
-        )
-
-        task = self.current_job_task
-        if task is None:
-            return {
-                "running": False,
-                "taskId": None,
-                "summary": {"total": 0, "running": 0, "success": 0, "failed": 0,
-                            "aborted": 0, "pending": 0, "done": 0, "totalSize": 0,
-                            "transferredSize": 0, "percent": 0},
-                "active": [], "recentDone": [], "recovered": recovered_base,
-                "scanFinish": False,
-            }
-        task_id = task.task_id
-        # 必须使用调用方（请求线程）自己的 session，绝不复用后台线程私有的 self.session。
-        session = session or self.session
-        summary = get_progress_summary(session, task_id)
-        # 整体进度叠加恢复基数：已完成 = 本次 done + 历史 recovered。
-        done_with_recovered = summary["done"] + recovered_base
-        total_with_recovered = summary["total"] + recovered_base
-        percent = 0
-        if total_with_recovered > 0:
-            percent = int(round(done_with_recovered * 100.0 / total_with_recovered))
-        summary["done"] = done_with_recovered
-        summary["total"] = total_with_recovered
-        summary["percent"] = percent
-        return {
-            "running": True,
-            "taskId": task_id,
-            "summary": summary,
-            "active": get_progress_active(session, task_id),
-            "recentDone": get_progress_recent_done(session, task_id),
-            "recovered": recovered_base,
-            "scanFinish": task.scan_finish,
-        }
-
-    def stop_job(self, remove=False):
-        self.job.enable = 0
-        if self.current_job_task:
-            self.current_job_task.break_flag = True
+    def stopJob(self, remove=False):
+        self.job['enable'] = 0
+        if self.currentJobTask:
+            self.currentJobTask.breakFlag = True
         if remove:
             if self.scheduled is not None:
                 try:
                     self.scheduled.shutdown(wait=False)
                 except Exception as e:
-                    logger.warning(G.stop_fail.format(str(e)))
-                    logger.exception(e)
+                    logger.warning("停止同步作业调度失败：%s", str(e))
                 self.scheduled = None
         else:
-            if self.scheduled_job is not None:
+            if self.scheduledJob is not None:
                 try:
-                    self.scheduled_job.pause()
+                    self.scheduledJob.pause()
                 except Exception as e:
-                    logger.warning(G.disable_fail.format(str(e)))
-                    logger.exception(e)
+                    logger.warning("禁用同步作业调度失败：%s", str(e))
         if not remove:
-            update_job_enable(self.session, self.job_id, 0)
-            update_job_task_status_by_status_and_job_id(self.session, self.job_id)
+            job_dao.update_job_enable(self.jobId, 0, self._session_factory)
+            job_dao.update_job_task_status_by_status_and_job_id(
+                self.jobId, self._session_factory)
 
 
-def add_job_task_item_many(session, items):
-    from core.sync.job_dao import add_job_task_item_many as _impl
-    _impl(session, items)
-
-
-def update_job_task_status_by_status_and_job_id(session, job_id):
-    from core.sync.job_dao import update_job_task_status_by_status_and_job_id as _impl
-    _impl(session, job_id)
-
-
-def delete_job(session, job_id):
-    from core.sync.job_dao import delete_job as _impl
-    _impl(session, job_id)
-
-
-def update_job_enable(session, job_id, enable):
-    from core.sync.job_dao import update_job_enable as _impl
-    _impl(session, job_id)
+def json_dumps(job):
+    import json
+    return json.dumps(job, ensure_ascii=False, default=str)

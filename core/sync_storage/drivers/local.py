@@ -1,185 +1,131 @@
-"""本地文件系统驱动（移植自 TaoSync service/storage/drivers/local.py）。"""
+"""本地目录驱动（移植自 TaoSync service/storage/drivers/local.py）。
+
+后端为进程可见的绝对路径；Docker 部署需先把宿主机目录挂进容器。
+"""
+from __future__ import annotations
+
 import os
-import re
 import shutil
-import uuid
 
-from ..file_fingerprint import file_fingerprint
+from core.sync_storage.base import (
+    TransferCancelled,
+    check_cancel,
+    child_path,
+    normalize_path,
+)
+from core.sync_storage.base import StorageDriver
 
-from ..base import StorageDriver, check_cancel, normalize_path
+
+def _list_dir(path):
+    entries = []
+    for name in os.listdir(path):
+        full = os.path.join(path, name)
+        if os.path.isdir(full):
+            entries.append({"name": name, "is_dir": True, "size": None})
+        else:
+            try:
+                size = os.path.getsize(full)
+            except OSError:
+                size = 0
+            entries.append({"name": name, "is_dir": False, "size": size})
+    return entries
 
 
 class LocalDriver(StorageDriver):
     driver_type = "local"
 
     def __init__(self, config):
-        root = config.get("root_path") or config.get("path")
+        root = str(config.get("root_path") or "").strip()
         if not root:
             raise ValueError("local root_path is required")
-        self.root = os.path.realpath(os.path.abspath(os.path.expanduser(str(root))))
-        if not os.path.isdir(self.root):
-            raise ValueError("local root_path must be an existing directory")
+        if not os.path.isabs(root):
+            raise ValueError("local root_path must be an absolute path")
+        self.root = os.path.abspath(root)
 
-    def _resolve(self, path, allow_root=True):
-        path = normalize_path(path, allow_root=allow_root)
-        relative = path.lstrip("/").replace("/", os.sep)
-        if os.name == "nt":
-            for component in relative.split(os.sep) if relative else []:
-                self._validate_windows_component(component)
-        candidate = os.path.abspath(os.path.join(self.root, relative))
-        try:
-            if os.path.commonpath((self.root, candidate)) != self.root:
-                raise ValueError("path escapes local root")
-        except ValueError:
-            raise ValueError("path escapes local root")
-        current = self.root
-        for part in relative.split(os.sep) if relative else []:
-            current = os.path.join(current, part)
-            if os.path.lexists(current) and os.path.islink(current):
-                raise ValueError("symbolic links are not supported inside a local mount")
-        resolved = os.path.realpath(candidate)
-        if os.path.commonpath((self.root, resolved)) != self.root:
-            raise ValueError("path escapes local root")
-        return candidate
-
-    @staticmethod
-    def _validate_windows_component(component):
-        if (
-            not component
-            or component.endswith((".", " "))
-            or any(ord(char) < 32 or char in '<>:"/\\|?*' for char in component)
-        ):
-            raise ValueError("invalid Windows local file name")
-        stem = component.split(".", 1)[0].upper()
-        if stem in {"CON", "PRN", "AUX", "NUL"} or re.fullmatch(
-            r"(?:COM|LPT)[1-9]", stem
-        ):
-            raise ValueError("reserved Windows local file name")
+    # ---- 虚拟路径 <-> 本地路径 ----
+    def _to_local(self, path):
+        rel = normalize_path(path)
+        if rel == "/":
+            return self.root
+        # 防穿越：join 后必须仍在 root 内
+        full = os.path.normpath(os.path.join(self.root, rel.lstrip("/")))
+        if full != self.root and not full.startswith(self.root + os.sep):
+            raise ValueError("path escapes storage root")
+        return full
 
     def list(self, path, details=False):
-        target = self._resolve(path)
-        if not os.path.isdir(target):
-            raise FileNotFoundError(path)
-        result = []
-        with os.scandir(target) as entries:
-            for entry in entries:
-                try:
-                    if entry.is_symlink():
-                        continue
-                    resolved_entry = os.path.realpath(entry.path)
-                    if os.path.commonpath((self.root, resolved_entry)) != self.root:
-                        continue
-                    is_dir = entry.is_dir(follow_symlinks=True)
-                    info = entry.stat(follow_symlinks=False)
-                    size = None if is_dir else info.st_size
-                except (OSError, ValueError):
-                    continue
-                item = {
-                    "name": entry.name,
-                    "is_dir": is_dir,
-                    "size": size,
-                }
-                if details:
-                    item["fingerprint"] = file_fingerprint(
-                        "local",
-                        getattr(info, "st_dev", None),
-                        getattr(info, "st_ino", None),
-                        getattr(info, "st_mtime_ns", None),
-                    )
-                result.append(item)
-        result.sort(key=lambda x: (not x["is_dir"], x["name"].casefold()))
-        return result
+        local = self._to_local(path)
+        if not os.path.isdir(local):
+            raise FileNotFoundError(local)
+        if details:
+            return _list_dir(local)
+        return [e["name"] for e in _list_dir(local)]
 
     def mkdir(self, path):
-        os.makedirs(self._resolve(path), exist_ok=True)
+        os.makedirs(self._to_local(path), exist_ok=True)
 
     def delete(self, path):
-        target = self._resolve(path, allow_root=False)
-        if os.path.isdir(target) and not os.path.islink(target):
-            shutil.rmtree(target)
-        else:
-            os.remove(target)
+        local = self._to_local(path)
+        if local == self.root:
+            raise ValueError("storage root cannot be deleted")
+        if os.path.isdir(local) and not os.path.islink(local):
+            shutil.rmtree(local)
+        elif os.path.exists(local):
+            os.remove(local)
 
     def download(self, path, target, progress=None, cancel=None):
-        source = self._resolve(path, allow_root=False)
-        size = os.path.getsize(source)
-        done = 0
-        with open(source, "rb") as fp:
+        check_cancel(cancel)
+        source = self._to_local(path)
+        if not os.path.isfile(source):
+            raise FileNotFoundError(source)
+        total = os.path.getsize(source)
+        copied = 0
+        with open(source, "rb") as fh:
             while True:
                 check_cancel(cancel)
-                chunk = fp.read(1024 * 1024)
+                chunk = fh.read(1024 * 1024)
                 if not chunk:
                     break
                 target.write(chunk)
-                done += len(chunk)
-                if progress:
-                    progress(done / size if size else 1.0)
-        if done != size:
-            raise IOError("local file changed during download")
-        if progress and size == 0:
+                copied += len(chunk)
+                if progress is not None and total:
+                    progress(copied / total)
+        if progress is not None:
             progress(1.0)
 
     def upload(self, path, source, size=None, progress=None, cancel=None):
-        destination = self._resolve(path, allow_root=False)
-        if os.path.isdir(destination):
-            raise IsADirectoryError(path)
-        os.makedirs(os.path.dirname(destination), exist_ok=True)
-        temporary = destination + ".taosync-" + uuid.uuid4().hex + ".part"
-        done = 0
-        try:
-            with open(temporary, "wb") as fp:
+        check_cancel(cancel)
+        local = self._to_local(path)
+        parent = os.path.dirname(local)
+        if parent and not os.path.isdir(parent):
+            os.makedirs(parent, exist_ok=True)
+        tmp = local + ".taosync.tmp"
+        copied = 0
+        with open(source, "rb") if hasattr(source, "read") else open(source, "rb") as fh:
+            with open(tmp, "wb") as out:
                 while True:
                     check_cancel(cancel)
-                    chunk = source.read(1024 * 1024)
+                    chunk = fh.read(1024 * 1024)
                     if not chunk:
                         break
-                    fp.write(chunk)
-                    done += len(chunk)
-                    if progress:
-                        progress(done / size if size else 1.0)
-            if size is not None and done != int(size):
-                raise IOError("source stream ended before the expected file size")
-            check_cancel(cancel)
-            os.replace(temporary, destination)
-            if progress and size == 0:
-                progress(1.0)
-        finally:
-            try:
-                if os.path.exists(temporary):
-                    os.remove(temporary)
-            except OSError:
-                pass
+                    out.write(chunk)
+                    copied += len(chunk)
+                    if progress is not None and size:
+                        progress(copied / size)
+        os.replace(tmp, local)
+        if progress is not None:
+            progress(1.0)
 
     def copy(self, source_path, destination_path, size=None, progress=None, cancel=None):
-        source = self._resolve(source_path, allow_root=False)
-        destination = self._resolve(destination_path, allow_root=False)
-        if os.path.isdir(destination):
-            raise IsADirectoryError(destination_path)
-        os.makedirs(os.path.dirname(destination), exist_ok=True)
-        temporary = destination + ".taosync-" + uuid.uuid4().hex + ".part"
-        total = os.path.getsize(source) if size is None else size
-        done = 0
-        try:
-            with open(source, "rb") as src, open(temporary, "wb") as dst:
-                while True:
-                    check_cancel(cancel)
-                    chunk = src.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    dst.write(chunk)
-                    done += len(chunk)
-                    if progress:
-                        progress(done / total if total else 1.0)
-            if total is not None and done != int(total):
-                raise IOError("source file size changed during copy")
-            check_cancel(cancel)
-            shutil.copystat(source, temporary, follow_symlinks=False)
-            os.replace(temporary, destination)
-            if progress and total == 0:
-                progress(1.0)
-        finally:
-            try:
-                if os.path.exists(temporary):
-                    os.remove(temporary)
-            except OSError:
-                pass
+        """Local-to-local native copy (no streaming through process)."""
+        check_cancel(cancel)
+        src = self._to_local(source_path)
+        dst = self._to_local(destination_path)
+        parent = os.path.dirname(dst)
+        if parent and not os.path.isdir(parent):
+            os.makedirs(parent, exist_ok=True)
+        tmp = dst + ".taosync.tmp"
+        shutil.copyfile(src, tmp)
+        os.replace(tmp, dst)
+        if progress is not None:
+            progress(1.0)

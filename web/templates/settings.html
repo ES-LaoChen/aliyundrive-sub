@@ -4,13 +4,6 @@
 {% block content %}
 {{ page_head('Settings', '设置', '凭证与通知配置') }}
 
-<div class="filter-bar">
-  <a class="btn ghost" href="{{ url_for('settings.storage') }}">
-    <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M4 6h16v2H4zM4 11h16v2H4zM4 16h10v2H4z"/></svg>
-    存储目录管理（同步引擎多后端）
-  </a>
-</div>
-
 <div class="settings-grid">
 {# ── 云盘凭证区块（默认展开） ── #}
 <details class="surface" open>

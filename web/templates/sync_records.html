@@ -2,81 +2,47 @@
 {% from "macros.html" import page_head, empty %}
 {% block title %}同步记录 · {{ app_name }}{% endblock %}
 {% block content %}
-{{ page_head('同步管理', '同步记录', '同步操作历史日志：同步时间、状态、数据量、错误信息与操作人员，支持按时间范围与状态筛选并导出 CSV') }}
+{{ page_head('网盘同步', '同步运行记录', '审计每次作业运行的统计与结果',
+  actions='<a class="btn ghost" href="' + url_for('sync_bp.index') + '">返回作业列表</a>') }}
 
 <section class="surface">
-  <form method="get" action="{{ url_for('sync_records.index') }}" class="record-filters">
-    <label>作业ID<input type="text" name="jobId" value="{{ filters.jobId or '' }}" placeholder="如 1"></label>
-    <label>状态
-      <select name="status">
-        <option value="">全部</option>
-        {% for code, label in status_labels.items() %}
-        <option value="{{ code }}" {{ 'selected' if (filters.status | string) == (code | string) }}>{{ label }}</option>
-        {% endfor %}
-      </select>
-    </label>
-    <label>操作人员<input type="text" name="operator" value="{{ filters.operator or '' }}" placeholder="如 手动 / 自动调度"></label>
-    <label>开始时间起<input type="text" name="startTimeFrom" value="{{ filters.startTimeFrom or '' }}" placeholder="YYYY-MM-DD HH:MM:SS"></label>
-    <label>开始时间止<input type="text" name="startTimeTo" value="{{ filters.startTimeTo or '' }}" placeholder="YYYY-MM-DD HH:MM:SS"></label>
-    <div class="filter-actions">
-      <button type="submit" class="btn primary">筛选</button>
-      <a class="btn ghost" href="{{ url_for('sync_records.index') }}">重置</a>
-      <a class="btn ghost" href="{{ url_for('sync_records.export_csv', **filters) }}">导出 CSV</a>
-    </div>
-  </form>
-</section>
-
-<section class="surface">
-  <div class="section-head">
-    <h2>同步记录</h2>
-    <span class="cell-sub">共 {{ total }} 条</span>
-  </div>
+  <div class="section-head"><h2>记录列表</h2></div>
   <div class="table-wrap">
     <table class="grid">
       <thead>
         <tr>
           <th>作业</th>
-          <th>操作人员</th>
+          <th>操作人</th>
           <th>状态</th>
-          <th style="text-align:right">文件数</th>
-          <th style="text-align:right">数据量</th>
-          <th>错误信息</th>
+          <th>文件数</th>
+          <th>大小</th>
           <th>开始时间</th>
           <th>结束时间</th>
         </tr>
       </thead>
       <tbody>
-      {% for r in records %}
+        {% set rows = records.dataList if records is mapping and 'dataList' in records else records %}
+        {% if not rows %}
+        <tr><td colspan="7">{{ empty('暂无同步记录') }}</td></tr>
+        {% endif %}
+        {% for r in rows %}
         <tr>
-          <td class="cell-main">{{ r.jobName }}<span class="cell-sub">#{{ r.jobId }}</span></td>
-          <td>{{ r.operator }}</td>
+          <td>{{ r.jobName or r.jobId }}</td>
+          <td>{{ r.operator or '—' }}</td>
           <td>
-            <span class="badge {{ 'ok' if r.status == 2 else 'warn' if r.status == 3 else 'bad' }}">{{ r.status_label }}</span>
+            {% if r.status == 2 %}<span class="badge ok">成功</span>
+            {% elif r.status == 3 %}<span class="badge warn">部分失败</span>
+            {% elif r.status in (6,7) %}<span class="badge bad">失败</span>
+            {% else %}{{ r.status }}{% endif %}
           </td>
-          <td style="text-align:right">{{ r.dataCount }}</td>
-          <td style="text-align:right">{{ r.dataSize | filesize }}</td>
-          <td class="cell-sub" title="{{ r.errMsg }}">{{ r.errMsg[:60] or '—' }}</td>
-          <td>{{ r.start_text }}</td>
-          <td>{{ r.end_text }}</td>
+          <td>{{ r.dataCount }}</td>
+          <td>{{ r.dataSize }}</td>
+          <td>{{ r.startTime|localtime if r.startTime else '—' }}</td>
+          <td>{{ r.endTime|localtime if r.endTime else '—' }}</td>
         </tr>
-      {% else %}
-        <tr><td colspan="8">{{ empty('暂无同步记录，运行同步作业后将自动归档。') }}</td></tr>
-      {% endfor %}
+        {% endfor %}
       </tbody>
     </table>
   </div>
-
-  {% if total > page_size %}
-  <div class="pager">
-    {% set pages = (total / page_size) | round(0, 'ceil') | int %}
-    {% if page_num > 1 %}
-      <a class="btn ghost mini" href="{{ url_for('sync_records.index', jobId=filters.jobId, status=filters.status, operator=filters.operator, startTimeFrom=filters.startTimeFrom, startTimeTo=filters.startTimeTo, pageNum=page_num-1) }}">上一页</a>
-    {% endif %}
-    <span class="cell-sub">第 {{ page_num }} / {{ pages }} 页</span>
-    {% if page_num < pages %}
-      <a class="btn ghost mini" href="{{ url_for('sync_records.index', jobId=filters.jobId, status=filters.status, operator=filters.operator, startTimeFrom=filters.startTimeFrom, startTimeTo=filters.startTimeTo, pageNum=page_num+1) }}">下一页</a>
-    {% endif %}
-  </div>
-  {% endif %}
 </section>
 {% endblock %}

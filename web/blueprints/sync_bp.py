@@ -1,310 +1,260 @@
-"""同步管理蓝图：作业列表 / 新增 / 编辑 / 删除 / 手动运行 / 暂停 / 继续 / 中止。
-
-仅移动模式（method=2）。调度支持间隔 / cron / 手动三种。
-存储目录（挂载）的管理入口在「系统设置」蓝图（engine 管理区）。
-"""
+"""同步作业蓝图：作业列表 / 新建 / 编辑 / 删除 / 手动执行 / 启停 / 进度。"""
 from __future__ import annotations
 
 import logging
+import json
 
 from flask import (
-    Blueprint,
-    current_app,
-    flash,
-    jsonify,
-    redirect,
-    render_template,
-    request,
-    url_for,
+    Blueprint, current_app, flash, jsonify, redirect, render_template,
+    request, url_for,
 )
 
-from core.sync.job_dao import get_job_by_id
 from web.services import Services
 
 logger = logging.getLogger(__name__)
 
-bp = Blueprint("sync", __name__, url_prefix="/sync")
-
-# 调度类型：0-间隔 1-cron 2-手动。
-SCHED_TYPES = (
-    {"value": 0, "label": "间隔"},
-    {"value": 1, "label": "Cron"},
-    {"value": 2, "label": "手动"},
-)
+bp = Blueprint("sync_bp", __name__, url_prefix="/sync")
 
 
 def _services() -> Services:
     return current_app.config["SERVICES"]
 
 
-def _mounts():
-    """返回挂载列表，供表单提示路径前缀。"""
+def _sync():
     svc = _services()
-    try:
-        return svc.sync_service.get_mount_list()
-    except Exception:
-        logger.exception("读取挂载列表失败")
-        return []
+    if svc.sync_service is None:
+        raise RuntimeError("同步管理模块未初始化")
+    return svc.sync_service
 
 
 @bp.route("/", methods=["GET"], strict_slashes=False)
 def index():
-    svc = _services()
-    sched_filter = request.args.get("sched", "all")
+    sync = _sync()
     try:
-        view = svc.sync_service.get_job_list_view()
-        jobs = view.get("dataList", view) if isinstance(view, dict) else view
-    except Exception:
-        logger.exception("读取同步作业失败")
+        jobs = sync.get_job_list({})
+    except Exception as e:
+        logger.exception("读取同步作业列表失败")
         jobs = []
-    if sched_filter in ("0", "1", "2"):
-        jobs = [j for j in jobs if str(getattr(j, "isCron", "")) == sched_filter]
-    else:
-        sched_filter = "all"
-    mounts = _mounts()
-    return render_template(
-        "sync_jobs.html", jobs=jobs, sched_filter=sched_filter,
-        sched_types=SCHED_TYPES, mounts=mounts,
-    )
+        flash("读取同步作业列表失败：{}".format(e), "error")
+    return render_template("sync_jobs.html", jobs=jobs,
+                           mounts_exist=sync.validate_mounts_exist())
 
 
 @bp.route("/new", methods=["GET"])
 def new():
-    svc = _services()
-    mounts = _mounts()
-    engine_id = 0
-    try:
-        engine_id = svc.sync_service.get_system_engine_id()
-    except Exception:
-        logger.exception("读取系统引擎失败")
-    form = {
-        "remark": "", "engineId": engine_id, "srcPath": "", "dstPath": "",
-        "isCron": 0, "interval": 3600, "sourceMode": 0,
-        "exclude": "", "minFileSize": "", "maxFileSize": "", "enable": 1,
-    }
-    return render_template(
-        "sync_job_edit.html", job=None, form=form,
-        sched_types=SCHED_TYPES, mounts=mounts,
-    )
+    sync = _sync()
+    engines = sync.get_engine_list()
+    supported = sync.get_supported_drivers()
+    return render_template("sync_job_edit.html", job=None, engines=engines,
+                           supported=supported, form={})
 
 
 @bp.route("", methods=["POST"])
 def create():
-    svc = _services()
-    job = _collect_form()
+    sync = _sync()
+    form = dict(request.form.to_dict())
+    job = _form_to_job(form)
     try:
-        svc.sync_service.add_job(job)
-    except Exception as exc:
-        logger.exception("新增同步作业失败")
-        flash(f"保存失败：{exc}", "error")
-        return render_template(
-            "sync_job_edit.html", job=None, form=job,
-            sched_types=SCHED_TYPES, mounts=_mounts(),
-        )
-    flash(f"同步作业「{job.get('remark') or ''}」已创建", "success")
-    return redirect(url_for("sync.index"))
+        job_id = sync.add_job(job)
+    except Exception as e:
+        logger.exception("创建同步作业失败")
+        flash("创建失败：{}".format(e), "error")
+        engines = sync.get_engine_list()
+        supported = sync.get_supported_drivers()
+        return render_template("sync_job_edit.html", job=None, engines=engines,
+                               supported=supported, form=form)
+    flash("同步作业已创建", "success")
+    return redirect(url_for("sync_bp.index"))
 
 
 @bp.route("/<int:job_id>/edit", methods=["GET"])
 def edit(job_id: int):
-    svc = _services()
-    with svc.session_factory() as db:
-        job = get_job_by_id(db, job_id)
-    if job is None:
+    sync = _sync()
+    try:
+        job = sync.get_job_by_id(job_id)
+    except Exception:
         flash("作业不存在", "error")
-        return redirect(url_for("sync.index"))
-    form = {k: v for k, v in job.__dict__.items() if not k.startswith("_")}
-    # 数值字段友好化：size 空字符串。
-    for k in ("minFileSize", "maxFileSize"):
-        form[k] = "" if form.get(k) is None else form[k]
-    return render_template(
-        "sync_job_edit.html", job=job, form=form,
-        sched_types=SCHED_TYPES, mounts=_mounts(),
-    )
+        return redirect(url_for("sync_bp.index"))
+    engines = sync.get_engine_list()
+    supported = sync.get_supported_drivers()
+    return render_template("sync_job_edit.html", job=job, engines=engines,
+                           supported=supported, form=job)
 
 
 @bp.route("/<int:job_id>/edit", methods=["POST"])
 def update(job_id: int):
-    svc = _services()
-    job = _collect_form()
+    sync = _sync()
+    form = dict(request.form.to_dict())
+    job = _form_to_job(form)
     job["id"] = job_id
     try:
-        svc.sync_service.edit_job(job)
-    except Exception as exc:
+        sync.update_job(job)
+    except Exception as e:
         logger.exception("编辑同步作业失败")
-        flash(f"保存失败：{exc}", "error")
-        with svc.session_factory() as db:
-            row = get_job_by_id(db, job_id)
-        form = {k: v for k, v in (row or job).__dict__.items() if not k.startswith("_")}
-        return render_template(
-            "sync_job_edit.html", job=row, form=form,
-            sched_types=SCHED_TYPES, mounts=_mounts(),
-        )
-    flash(f"同步作业「{job.get('remark') or ''}」已保存", "success")
-    return redirect(url_for("sync.index"))
+        flash("编辑失败：{}".format(e), "error")
+        engines = sync.get_engine_list()
+        supported = sync.get_supported_drivers()
+        form["id"] = job_id
+        return render_template("sync_job_edit.html", job=job, engines=engines,
+                               supported=supported, form=form)
+    flash("同步作业已更新", "success")
+    return redirect(url_for("sync_bp.index"))
 
 
 @bp.route("/<int:job_id>/delete", methods=["POST"])
 def delete(job_id: int):
-    svc = _services()
+    sync = _sync()
     try:
-        svc.sync_service.remove_job(job_id)
-    except Exception as exc:
+        sync.remove_job(job_id)
+        flash("同步作业已删除", "success")
+    except Exception as e:
         logger.exception("删除同步作业失败")
-        flash(f"删除失败：{exc}", "error")
-        return redirect(url_for("sync.index"))
-    flash("同步作业已删除", "success")
-    return redirect(url_for("sync.index"))
+        flash("删除失败：{}".format(e), "error")
+    return redirect(url_for("sync_bp.index"))
 
 
 @bp.route("/<int:job_id>/run", methods=["POST"])
 def run(job_id: int):
-    svc = _services()
+    sync = _sync()
     try:
-        svc.sync_service.do_job_manual(job_id)
-        flash(f"已触发作业 #{job_id} 手动运行", "info")
-    except Exception as exc:
-        logger.exception("手动运行同步作业失败")
-        flash(f"运行失败：{exc}", "error")
-    return redirect(url_for("sync.index"))
+        sync.do_job_manual(job_id)
+        flash("已触发手动同步", "success")
+    except Exception as e:
+        logger.exception("手动同步失败")
+        flash("手动同步失败：{}".format(e), "error")
+    return redirect(url_for("sync_bp.index"))
 
 
 @bp.route("/<int:job_id>/pause", methods=["POST"])
 def pause(job_id: int):
-    svc = _services()
+    sync = _sync()
     try:
-        svc.sync_service.pause_job(job_id)
-        flash(f"作业 #{job_id} 已禁用", "info")
-    except Exception as exc:
-        logger.exception("禁用同步作业失败")
-        flash(f"禁用失败：{exc}", "error")
-    return redirect(url_for("sync.index"))
+        sync.pause_job(job_id)
+        flash("已禁用作业", "success")
+    except Exception as e:
+        flash("禁用失败：{}".format(e), "error")
+    return redirect(url_for("sync_bp.index"))
 
 
 @bp.route("/<int:job_id>/resume", methods=["POST"])
 def resume(job_id: int):
-    svc = _services()
+    sync = _sync()
     try:
-        svc.sync_service.continue_job(job_id)
-        flash(f"作业 #{job_id} 已启用", "info")
-    except Exception as exc:
-        logger.exception("启用同步作业失败")
-        flash(f"启用失败：{exc}", "error")
-    return redirect(url_for("sync.index"))
+        sync.continue_job(job_id)
+        flash("已启用作业", "success")
+    except Exception as e:
+        flash("启用失败：{}".format(e), "error")
+    return redirect(url_for("sync_bp.index"))
 
 
 @bp.route("/<int:job_id>/abort", methods=["POST"])
 def abort(job_id: int):
-    svc = _services()
+    sync = _sync()
     try:
-        svc.sync_service.abort_job(job_id)
-        flash(f"作业 #{job_id} 已中止", "info")
-    except Exception as exc:
-        logger.exception("中止同步作业失败")
-        flash(f"中止失败：{exc}", "error")
-    return redirect(url_for("sync.index"))
+        sync.abort_job(job_id)
+        flash("已发送中止信号", "success")
+    except Exception as e:
+        flash("中止失败：{}".format(e), "error")
+    return redirect(url_for("sync_bp.index"))
 
 
 @bp.route("/run-all", methods=["POST"])
 def run_all():
-    svc = _services()
+    sync = _sync()
     try:
-        svc.sync_service.do_all_manual()
-        flash("已触发全部启用作业手动运行", "info")
-    except Exception as exc:
-        logger.exception("批量运行失败")
-        flash(f"运行失败：{exc}", "error")
-    return redirect(url_for("sync.index"))
+        sync.do_all_job_manual()
+        flash("已触发所有启用作业", "success")
+    except Exception as e:
+        flash("触发失败：{}".format(e), "error")
+    return redirect(url_for("sync_bp.index"))
 
 
-@bp.route("/current", methods=["GET"])
-def current():
-    """返回作业当前运行状态（JSON），供前端轮询。"""
-    svc = _services()
-    job_id = request.args.get("job_id", type=int)
-    if job_id is None:
-        return jsonify(error="job_id required"), 400
-    try:
-        data = svc.sync_service.get_job_current(job_id)
-    except Exception as exc:
-        return jsonify(error=str(exc)), 500
-    return jsonify(data)
-
-
-@bp.route("/<int:job_id>/progress", methods=["GET"])
+@bp.route("/progress/<int:job_id>", methods=["GET"])
 def progress(job_id: int):
-    """同步实时进度面板（HTML）。"""
-    svc = _services()
+    sync = _sync()
     try:
-        with svc.session_factory() as db:
-            job = get_job_by_id(db, job_id)
-        if job is None:
-            flash("作业不存在", "error")
-            return redirect(url_for("sync.index"))
-        job_view = {k: v for k, v in job.__dict__.items() if not k.startswith("_")}
-    except Exception:
-        logger.exception("读取同步作业失败")
-        job_view = {"id": job_id, "remark": ""}
-    return render_template("sync_progress.html", job=job_view)
+        data = sync.get_job_current(job_id)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    return jsonify(data or {"scanFinish": False, "doingTask": []})
 
 
-@bp.route("/<int:job_id>/progress-json", methods=["GET"])
-def progress_json(job_id: int):
-    """同步实时进度（JSON），供前端轮询。无运行任务时返回 running=false。"""
-    svc = _services()
+@bp.route("/tasks/<int:job_id>", methods=["GET"])
+def tasks(job_id: int):
+    sync = _sync()
+    page_size = int(request.args.get("pageSize", 10))
+    page_num = int(request.args.get("pageNum", 1))
     try:
-        data = svc.sync_service.get_job_progress(job_id)
-    except Exception as exc:
-        logger.exception("读取同步进度失败")
-        return jsonify(error=str(exc)), 500
-    return jsonify(data)
+        tasks = sync.get_task_list({"id": job_id, "pageSize": page_size, "pageNum": page_num})
+    except Exception as e:
+        logger.exception("读取任务列表失败")
+        tasks = {"dataList": [], "total": 0}
+        flash("读取任务列表失败：{}".format(e), "error")
+    # 把 taskNum（JSON 字符串）解析为 dict，便于模板读取 successNum/failNum。
+    if isinstance(tasks, dict):
+        for t in tasks.get("dataList", []):
+            raw = t.get("taskNum")
+            if isinstance(raw, str) and raw.strip():
+                try:
+                    t["taskNum"] = json.loads(raw)
+                except (TypeError, ValueError):
+                    t["taskNum"] = {}
+            elif raw is None:
+                t["taskNum"] = {}
+    return render_template("sync_progress.html", job_id=job_id, tasks=tasks)
 
 
-def _session(svc):
-    # 复用 sync_service 的 session_factory 取一次性会话。
-    holder = {"db": None}
+@bp.route("/tasks/<int:job_id>/<int:task_id>/items", methods=["GET"])
+def task_items(job_id: int, task_id: int):
+    sync = _sync()
+    page_size = int(request.args.get("pageSize", 50))
+    page_num = int(request.args.get("pageNum", 1))
+    try:
+        items = sync.get_task_item_list(
+            {"taskId": task_id, "pageSize": page_size, "pageNum": page_num})
+    except Exception as e:
+        logger.exception("读取任务条目失败")
+        items = {"dataList": [], "total": 0}
+    return render_template("partials/sync_task_items.html", job_id=job_id,
+                           task_id=task_id, items=items)
 
-    class _Ctx:
-        def __enter__(self_inner):
-            holder["db"] = svc.session_factory()()
-            return holder["db"]
 
-        def __exit__(self_inner, *exc):
-            holder["db"].close()
+def _form_to_job(form):
+    def _int(v, default=0):
+        v = (v or "").strip()
+        if v == "":
+            return default
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return default
 
-    with _Ctx() as db:
-        return db
-
-
-def _collect_form() -> dict:
-    """从 request.form 收集同步作业字段，统一成 job dict。"""
-    form = request.form
-    job = {
-        "remark": (form.get("remark") or "").strip(),
-        "engineId": int(form.get("engineId") or 0),
-        "srcPath": (form.get("srcPath") or "").strip(),
-        "dstPath": (form.get("dstPath") or "").strip(),
-        # 仅移动模式。
-        "method": 2,
-        "sourceMode": int(form.get("sourceMode") or 0),
-        "isCron": int(form.get("isCron") or 0),
-        "interval": int(form.get("interval") or 0),
-        "exclude": (form.get("exclude") or "").strip(),
-        "enable": 1 if form.get("enable") == "1" else 0,
-        # cron 字段
-        "year": (form.get("year") or "").strip(),
-        "month": (form.get("month") or "").strip(),
-        "day": (form.get("day") or "").strip(),
-        "week": (form.get("week") or "").strip(),
-        "day_of_week": (form.get("day_of_week") or "").strip(),
-        "hour": (form.get("hour") or "").strip(),
-        "minute": (form.get("minute") or "").strip(),
-        "second": (form.get("second") or "").strip(),
-        "start_date": (form.get("start_date") or "").strip(),
-        "end_date": (form.get("end_date") or "").strip(),
+    alist_id = form.get("alistId", "").strip()
+    return {
+        "enable": 1 if form.get("enable") == "on" or form.get("enable") == "1" else 0,
+        "remark": form.get("remark", "").strip(),
+        "srcPath": form.get("srcPath", "").strip(),
+        "dstPath": form.get("dstPath", "").strip(),
+        "alistId": int(alist_id) if alist_id else None,
+        "useCacheT": _int(form.get("useCacheT", "1"), 1),
+        "scanIntervalT": _int(form.get("scanIntervalT", "0"), 0),
+        "useCacheS": _int(form.get("useCacheS", "1"), 1),
+        "scanIntervalS": _int(form.get("scanIntervalS", "0"), 0),
+        "method": _int(form.get("method", "0"), 0),
+        "sourceMode": _int(form.get("sourceMode", "0"), 0),
+        "interval": _int(form.get("interval", "0"), 0),
+        "isCron": _int(form.get("isCron", "0"), 0),
+        "year": form.get("year", "").strip(),
+        "month": form.get("month", "").strip(),
+        "day": form.get("day", "").strip(),
+        "week": form.get("week", "").strip(),
+        "day_of_week": form.get("day_of_week", "").strip(),
+        "hour": form.get("hour", "").strip(),
+        "minute": form.get("minute", "").strip(),
+        "second": form.get("second", "").strip(),
+        "start_date": form.get("start_date", "").strip(),
+        "end_date": form.get("end_date", "").strip(),
+        "exclude": form.get("exclude", "").strip(),
+        "minFileSize": form.get("minFileSize", "").strip() or None,
+        "maxFileSize": form.get("maxFileSize", "").strip() or None,
     }
-    min_fs = (form.get("minFileSize") or "").strip()
-    max_fs = (form.get("maxFileSize") or "").strip()
-    job["minFileSize"] = int(min_fs) if min_fs else None
-    job["maxFileSize"] = int(max_fs) if max_fs else None
-    return job

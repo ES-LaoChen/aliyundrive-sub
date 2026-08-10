@@ -245,16 +245,3 @@ class TGMonitorLog(Base):
 # 保持现有 __all__ 兼容性 —— 让旧的 ``from models import *`` 仍然能用。
 # 新增模型只需添加到这里。
 
-# 同步管理模块 ORM 实体（移植自 TaoSync 的 engine/mount/job 体系）。
-# 在此导入以注册到 Base.metadata，供 init_db 建表。
-from models_sync import (  # noqa: F401,E402
-    SyncEngine,
-    SyncStorageMount,
-    SyncJob,
-    SyncTask,
-    SyncTaskItem,
-    SyncSourceSnapshot,
-    SyncSourceSnapshotMeta,
-    SyncMoveLog,
-)
-

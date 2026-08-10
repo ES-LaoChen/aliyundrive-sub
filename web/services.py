@@ -38,5 +38,5 @@ class Services:
     retry_policy: Any = None
     # ----- T-TG：Telegram 频道监控自动转存服务（向前兼容：默认 None） -----
     tg_monitor: Any = None
-    # ----- 同步管理（移植自 TaoSync）：作业编排 + 多后端存储目录管理 -----
+    # ----- 同步管理模块（网盘同步：local + 外部 OpenList/AList） -----
     sync_service: Any = None

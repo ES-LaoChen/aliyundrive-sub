@@ -1,184 +1,56 @@
 {% extends "base.html" %}
-{% from "macros.html" import page_head, badge, empty %}
-{% block title %}同步进度 · {{ app_name }}{% endblock %}
+{% from "macros.html" import page_head, empty %}
+{% block title %}同步任务 · {{ app_name }}{% endblock %}
 {% block content %}
-{{ page_head('同步实时进度', job.remark or ('作业 #' + job.id|string()),
-  actions='<a class="btn ghost" href="' + url_for('sync.index') + '">返回作业列表</a>') }}
+{{ page_head('网盘同步', '同步任务', '作业 #' + job_id|string + ' 的运行记录',
+  actions='<a class="btn ghost" href="' + url_for('sync_bp.index') + '">返回作业列表</a>') }}
 
-<div class="progress-shell" id="progress-shell" data-job-id="{{ job.id }}">
-  <div id="not-running" class="surface" style="display:none">
-    <p class="cell-sub">当前没有正在运行的同步任务。点击作业列表中的「运行」开始同步后，此页面将实时刷新进度。</p>
+<section class="surface">
+  <div class="section-head"><h2>任务列表</h2></div>
+  <div class="table-wrap">
+    <table class="grid">
+      <thead>
+        <tr>
+          <th>任务 ID</th>
+          <th>运行状态</th>
+          <th>成功 / 失败</th>
+          <th>运行时间</th>
+          <th style="text-align:right">操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% set rows = tasks.dataList if tasks is mapping and 'dataList' in tasks else tasks %}
+        {% if not rows %}
+        <tr><td colspan="5">{{ empty('暂无任务记录') }}</td></tr>
+        {% endif %}
+        {% for t in rows %}
+        <tr>
+          <td>{{ t.id }}</td>
+          <td>
+            {% if t.status == 0 %}等待中
+            {% elif t.status == 1 %}运行中
+            {% elif t.status == 2 %}成功
+            {% elif t.status == 3 %}部分失败
+            {% elif t.status == 4 %}已中止
+            {% elif t.status == 6 %}失败
+            {% elif t.status == 7 %}失败
+            {% else %}{{ t.status }}{% endif %}
+          </td>
+          <td>
+            {% set num = {} %}
+            {% if t.taskNum %}
+              {% set num = t.taskNum %}
+            {% endif %}
+            {{ t.itemSuccessNum or num.successNum or 0 }} / {{ t.itemFailNum or num.failNum or 0 }}
+          </td>
+          <td>{{ t.runTime|localtime if t.runTime else '—' }}</td>
+          <td style="text-align:right">
+            <a class="btn sm" href="{{ url_for('sync_bp.task_items', job_id=job_id, task_id=t.id) }}">查看条目</a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
   </div>
-
-  <div id="running" style="display:none">
-    <!-- 整体进度 -->
-    <section class="surface">
-      <div class="section-head"><h2>整体进度</h2><span class="cell-sub" id="scan-state"></span></div>
-      <div class="overall-bar">
-        <div class="overall-fill" id="overall-fill" style="width:0%"></div>
-        <span class="overall-pct" id="overall-pct">0%</span>
-      </div>
-      <div class="stat-row">
-        <div class="stat-mini"><span class="num" id="stat-total">0</span><span class="lbl">总文件</span></div>
-        <div class="stat-mini"><span class="num" id="stat-done">0</span><span class="lbl">已完成</span></div>
-        <div class="stat-mini"><span class="num ok" id="stat-success">0</span><span class="lbl">成功</span></div>
-        <div class="stat-mini"><span class="num err" id="stat-failed">0</span><span class="lbl">失败</span></div>
-        <div class="stat-mini"><span class="num" id="stat-running">0</span><span class="lbl">传输中</span></div>
-        <div class="stat-mini"><span class="num" id="stat-recovered">0</span><span class="lbl">已恢复(历史)</span></div>
-      </div>
-      <div class="stat-row">
-        <div class="stat-mini"><span class="num" id="stat-size">0 B</span><span class="lbl">已传输/总量</span></div>
-        <div class="stat-mini"><span class="num" id="stat-speed">0 B/s</span><span class="lbl">当前速度</span></div>
-        <div class="stat-mini"><span class="num" id="stat-eta">--</span><span class="lbl">剩余时间</span></div>
-      </div>
-    </section>
-
-    <!-- 当前传输中文件 -->
-    <section class="surface">
-      <div class="section-head"><h2>正在同步的文件</h2><span class="cell-sub" id="active-count"></span></div>
-      <div class="table-wrap">
-        <table class="grid">
-          <thead><tr><th>文件名</th><th>路径</th><th style="text-align:right">大小</th><th style="text-align:right">进度</th><th style="text-align:right">速度</th><th style="text-align:right">剩余</th></tr></thead>
-          <tbody id="active-rows"><tr><td colspan="6" class="cell-sub">暂无传输中文件</td></tr></tbody>
-        </table>
-      </div>
-    </section>
-
-    <!-- 最近完成 -->
-    <section class="surface">
-      <div class="section-head"><h2>最近完成</h2></div>
-      <div class="table-wrap">
-        <table class="grid">
-          <thead><tr><th>文件名</th><th>状态</th><th style="text-align:right">大小</th><th>说明</th></tr></thead>
-          <tbody id="recent-rows"><tr><td colspan="4" class="cell-sub">暂无</td></tr></tbody>
-        </table>
-      </div>
-    </section>
-  </div>
-</div>
-{% endblock %}
-
-{% block scripts %}
-<script>
-(function () {
-  var shell = document.getElementById('progress-shell');
-  if (!shell) return;
-  var jobId = shell.getAttribute('data-job-id');
-  var timer = null;
-
-  function fmtSize(b) {
-    b = Number(b) || 0;
-    var u = ['B','KB','MB','GB','TB'];
-    var i = 0;
-    while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; }
-    return (b >= 10 || i === 0 ? b.toFixed(0) : b.toFixed(1)) + ' ' + u[i];
-  }
-  function fmtEta(sec) {
-    sec = Math.round(Number(sec) || 0);
-    if (sec <= 0) return '--';
-    var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
-    if (h > 0) return h + 'h' + m + 'm';
-    if (m > 0) return m + 'm' + s + 's';
-    return s + 's';
-  }
-  function esc(s) {
-    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
-      return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
-    });
-  }
-
-  function render(data) {
-    var notRunning = document.getElementById('not-running');
-    var running = document.getElementById('running');
-    if (!data.running) {
-      notRunning.style.display = '';
-      running.style.display = 'none';
-      return;
-    }
-    notRunning.style.display = 'none';
-    running.style.display = '';
-
-    var s = data.summary || {};
-    var pct = s.percent || 0;
-    document.getElementById('overall-fill').style.width = pct + '%';
-    document.getElementById('overall-pct').textContent = pct + '%';
-    document.getElementById('scan-state').textContent = data.scanFinish ? '扫描已完成' : '扫描中…';
-    document.getElementById('stat-total').textContent = s.total || 0;
-    document.getElementById('stat-done').textContent = s.done || 0;
-    document.getElementById('stat-success').textContent = s.success || 0;
-    document.getElementById('stat-failed').textContent = s.failed || 0;
-    document.getElementById('stat-running').textContent = s.running || 0;
-    document.getElementById('stat-recovered').textContent = data.recovered || 0;
-    document.getElementById('stat-size').textContent = fmtSize(s.transferredSize) + ' / ' + fmtSize(s.totalSize);
-
-    // 活动文件：速度取所有传输中文件之和，ETA 基于总剩余量。
-    var active = data.active || [];
-    var totalSpeed = 0, remainBytes = 0;
-    active.forEach(function (a) {
-      totalSpeed += Number(a.speed) || 0;
-      remainBytes += (Number(a.fileSize) || 0) - (Number(a.transferred) || 0);
-    });
-    // 待处理文件也计入剩余字节（用平均速度估 ETA）。
-    var pending = (s.total - s.done - s.running);
-    var pendingBytes = Math.max(0, (s.totalSize - s.transferredSize));
-    document.getElementById('stat-speed').textContent = fmtSize(totalSpeed) + '/s';
-    var totalRemain = Math.max(0, pendingBytes);
-    var eta = totalSpeed > 0 ? totalRemain / totalSpeed : 0;
-    document.getElementById('stat-eta').textContent = fmtEta(eta);
-
-    // 活动表
-    var ar = document.getElementById('active-rows');
-    if (!active.length) {
-      ar.innerHTML = '<tr><td colspan="6" class="cell-sub">暂无传输中文件</td></tr>';
-    } else {
-      ar.innerHTML = active.map(function (a) {
-        var remain = (Number(a.fileSize) || 0) - (Number(a.transferred) || 0);
-        var etaOne = (Number(a.speed) || 0) > 0 ? remain / Number(a.speed) : 0;
-        return '<tr>' +
-          '<td class="cell-main">' + esc(a.fileName) + '</td>' +
-          '<td class="cell-sub">' + esc(a.srcPath) + '</td>' +
-          '<td style="text-align:right">' + fmtSize(a.fileSize) + '</td>' +
-          '<td style="text-align:right">' + (a.progress || 0) + '%</td>' +
-          '<td style="text-align:right">' + fmtSize(a.speed) + '/s</td>' +
-          '<td style="text-align:right">' + fmtEta(etaOne) + '</td>' +
-          '</tr>';
-      }).join('');
-    }
-    document.getElementById('active-count').textContent = active.length + ' 个';
-
-    // 最近完成
-    var recent = data.recentDone || [];
-    var rr = document.getElementById('recent-rows');
-    if (!recent.length) {
-      rr.innerHTML = '<tr><td colspan="4" class="cell-sub">暂无</td></tr>';
-    } else {
-      rr.innerHTML = recent.map(function (r) {
-        var st = r.status === 2 ? '<span class="badge ok">成功</span>' : '<span class="badge err">失败</span>';
-        return '<tr>' +
-          '<td class="cell-main">' + esc(r.fileName) + '</td>' +
-          '<td>' + st + '</td>' +
-          '<td style="text-align:right">' + fmtSize(r.fileSize) + '</td>' +
-          '<td class="cell-sub">' + esc(r.errMsg || '') + '</td>' +
-          '</tr>';
-      }).join('');
-    }
-  }
-
-  function poll() {
-    fetch('/sync/' + jobId + '/progress-json', {cache: 'no-store'})
-      .then(function (r) { return r.json(); })
-      .then(function (data) {
-        if (data && data.error) { console.warn('progress error:', data.error); return; }
-        render(data || {});
-      })
-      .catch(function (e) { console.warn('poll failed', e); });
-  }
-
-  // 前端轮询：2s 一次，避免高频请求造成卡顿；大规模文件下仅拉聚合 + 活动(≤20) + 最近(≤50)。
-  poll();
-  timer = setInterval(poll, 2000);
-  // 离开页面停止轮询。
-  window.addEventListener('beforeunload', function () { if (timer) clearInterval(timer); });
-})();
-</script>
+</section>
 {% endblock %}

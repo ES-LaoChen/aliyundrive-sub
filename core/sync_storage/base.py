@@ -1,14 +1,4 @@
-"""存储驱动抽象基类（移植自 TaoSync service/storage/drivers/base.py）。
-
-保留原作者的核心契约与跨后端流式传输实现（stream_transfer），仅调整导入与注释，
-行为保持一致。
-
-提供：
-- StorageDriver：list/mkdir/delete/download/upload/copy 契约。
-- TransferCancelled / check_cancel：可取消传输。
-- normalize_path / child_path：虚拟路径安全归一。
-- stream_transfer：跨后端经有界 OS 管道流式传输（带取消 + 错误归因）。
-"""
+"""存储驱动公共契约与跨后端流式传输（移植自 TaoSync service/storage/drivers/base.py）。"""
 from __future__ import annotations
 
 import os
