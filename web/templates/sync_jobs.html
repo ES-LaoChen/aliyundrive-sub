@@ -4,7 +4,7 @@
 {% block content %}
 {{ page_head('网盘同步', '同步作业', '在本地目录与外部 OpenList/AList 之间按计划同步文件',
   actions='<a class="btn primary" href="' + url_for('sync_bp.new') + '"><svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6z"/></svg>新增作业</a>' +
-  '<a class="btn" href="' + url_for('sync_bp.run_all') + '" onclick="return confirm(\'确认手动触发所有启用作业？\')"><svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>全部执行</a>' +
+  '<form method="post" action="' + url_for('sync_bp.run_all') + '" style="display:inline" onsubmit="return confirm(\'确认手动触发所有启用作业？\')"><button class="btn" type="submit"><svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>全部执行</button></form>' +
   '<a class="btn ghost" href="' + url_for('storage_picker_bp.index') + '"><svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>存储目录</a>' +
   '<a class="btn ghost" href="' + url_for('sync_records_bp.index') + '"><svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M13 3c-4.97 0-9 4.03-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42C8.27 19.99 10.51 21 13 21c4.97 0 9-4.03 9-9s-4.03-9-9-9zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg>同步记录</a>') }}
 
@@ -60,7 +60,9 @@
             <a class="btn sm" href="{{ url_for('sync_bp.progress', job_id=job.id) }}">进度</a>
             <a class="btn sm" href="{{ url_for('sync_bp.edit', job_id=job.id) }}">编辑</a>
             {% if job.enable == 1 %}
-              <a class="btn sm" href="{{ url_for('sync_bp.run', job_id=job.id) }}" onclick="return confirm('确认手动执行？')">执行</a>
+              <form method="post" action="{{ url_for('sync_bp.run', job_id=job.id) }}" style="display:inline">
+                <button class="btn sm" type="submit" onclick="return confirm('确认手动执行？')">执行</button>
+              </form>
               <form method="post" action="{{ url_for('sync_bp.pause', job_id=job.id) }}" style="display:inline">
                 <button class="btn sm warn" type="submit">禁用</button>
               </form>

@@ -671,8 +671,8 @@ class JobTask:
         failOrOtherNum = len(self.currentTasks[7]) + len(self.currentTasks[-1])
         status = 7 if self.breakFlag else 2 if failOrOtherNum == 0 else 3
         task_service.update_job_task_status(
-            self.taskId, status, taskList=self.currentTasks,
-            createTime=self.createTime, notifier=self._notifier,
+            self.taskId, status, task_list=self.currentTasks,
+            create_time=self.createTime, notifier=self._notifier,
             session_factory=self._session_factory)
 
 
