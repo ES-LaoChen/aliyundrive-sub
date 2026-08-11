@@ -198,11 +198,6 @@ def build_services(settings: Settings) -> Services:
         tg_monitor = TGMonitorService(settings, session_factory, scheduler, notifier)
         scheduler._tg_monitor = tg_monitor
 
-    # ---- 同步管理模块（网盘同步：local + 外部 OpenList/AList）----
-    from core.sync import SyncService
-
-    sync_service = SyncService(session_factory, notifier)
-
     # ---- 装配服务容器 ----
     services = Services(
         settings=settings,
@@ -219,7 +214,6 @@ def build_services(settings: Settings) -> Services:
         sub_lock=sub_lock,
         retry_policy=retry_policy,
         tg_monitor=tg_monitor,
-        sync_service=sync_service,
     )
 
     # ---- T-D4：启动时后台异步续跑 pending 任务 ----
@@ -353,20 +347,6 @@ async def _resume_one(services: Services, task) -> None:
         logger.exception("续跑单条异常 (sub=%s task=%s)", sub.id, task.id)
 
 
-def _init_sync_module(services: Services) -> None:
-    """确保同步管理模块的内置 TaoSync 引擎存在，并恢复运行作业。"""
-    from core.sync.storage_engine_bootstrap import ensure_builtin_engine
-    from db import utc_now
-
-    sync = services.sync_service
-    if sync is None:
-        return
-    # 幂等创建内置 taosync 引擎（protected=1，UI 不可删除）。
-    ensure_builtin_engine(services.session_factory)
-    # 启动时恢复异常终止状态的任务并启动所有启用作业。
-    sync.init_jobs()
-
-
 def main() -> None:
     settings = Settings()
     configure_logging(settings.LOG_LEVEL)
@@ -387,11 +367,6 @@ def main() -> None:
         services.scheduler.register_substatus_poll(services)
     except Exception:
         logger.warning("注册 substatus_poll 巡检任务失败（不影响订阅调度）", exc_info=True)
-    # 初始化同步管理模块：确保内置 TaoSync 引擎存在，并恢复/启动所有启用作业。
-    try:
-        _init_sync_module(services)
-    except Exception:
-        logger.warning("同步管理模块初始化失败（不影响主流程）", exc_info=True)
     logger.info("Web 启动于 %s:%s", settings.WEB_HOST, settings.WEB_PORT)
     # 生产请用 gunicorn -w 1（单 worker，避免多调度器）；此处用 Flask 内置服务器做 MVP。
     app.run(host=settings.WEB_HOST, port=settings.WEB_PORT, use_reloader=False)

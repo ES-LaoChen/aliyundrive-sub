@@ -1044,18 +1044,6 @@ details.surface[open] > summary::after { transform: rotate(-135deg); margin-top:
 .mini-bar > span { display: block; height: 100%; background: var(--primary, #4f46e5); }
 .mini-bar-num { font-size: 12px; color: var(--muted); }
 
-/* 条目表：路径/文件名截断，错误换行 */
-.sync-items td.cell-path { max-width: 220px; }
-.sync-items td.cell-path code { word-break: break-all; }
-.sync-items td.cell-name { max-width: 200px; word-break: break-all; }
-.sync-items td.cell-err { max-width: 220px; word-break: break-word; }
-
-/* 响应式：窄屏隐藏次要列 */
-@media (max-width: 760px) {
-  .sync-items .col-size, .sync-items .col-progress { display: none; }
-  .stats-bar { grid-template-columns: repeat(2, 1fr); }
-  .scan-status { font-size: 13px; }
-}
 .diary-links .link {
   font-size: 12.5px;
   padding: 6px 10px;

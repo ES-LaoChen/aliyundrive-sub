@@ -81,7 +81,6 @@ def get_session() -> Iterator[Session]:
 def init_db() -> None:
     """创建全部表（幂等）。需在 ORM 模型导入后调用。"""
     import models  # noqa: F401  # 触发 ORM 元数据注册到 Base.metadata
-    import models_sync  # noqa: F401  # 同步管理模块 ORM 元数据注册
     from sqlalchemy import text
 
     Base.metadata.create_all(get_engine())
